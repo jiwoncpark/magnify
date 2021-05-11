@@ -20,11 +20,11 @@ class Sampler:
         np.random.seed(seed)
 
     def sample(self, N):
-        # SF_inf = np.maximum(np.random.randn(N)*0.2 + 1.0, 0.2)
+        SF_inf = np.maximum(np.random.randn(N)*0.05 + 0.2, 0.2)
         # SF_inf = 10**(np.random.randn(N)*(0.25) + -0.8)
-        SF_inf = np.ones(N)*0.15
+        # SF_inf = np.ones(N)*0.15
         # tau = 10.0**np.maximum(np.random.randn(N)*0.5 + 2.0, 0.1)
-        tau = np.maximum(np.random.randn(N)*10.0 + 200.0, 100.0)
+        tau = np.maximum(np.random.randn(N)*50.0 + 200.0, 10.0)
         # mag = np.maximum(np.random.randn(N) + 19.0, 17.5)
         mag = np.zeros(N)
         # z = np.maximum(np.random.randn(N) + 2.0, 0.5)
@@ -36,13 +36,16 @@ def train(run_dir):
     os.makedirs(run_dir, exist_ok=True)
     train_seed = 123
     train_dataset = DRWDataset(Sampler(train_seed), 'train_drw',
-                               num_samples=100,
+                               num_samples=10000,
                                seed=train_seed,
                                shift_x=-3650*0.5,
                                rescale_x=1.0/(3650*0.5)*4.0,
                                delta_x=1.0,
                                max_x=3650.0,
                                err_y=0.01)
+    train_dataset.slice_params = [0, 1]
+    train_dataset.mean_params = torch.Tensor([0.2, 200.0])
+    train_dataset.std_params = torch.Tensor([0.05, 50.0])
     # Generate pointings
     cadence_obj = LSSTCadence('obs', train_seed)
     n_pointings = 100
@@ -66,6 +69,9 @@ def train(run_dir):
                              delta_x=1.0,
                              max_x=3650.0,
                              err_y=0.01)
+    val_dataset.slice_params = train_dataset.slice_params
+    val_dataset.mean_params = train_dataset.mean_params
+    val_dataset.std_params = train_dataset.std_params
     collate_fn = partial(collate_fn_opsim,
                          rng=np.random.default_rng(val_seed),
                          cadence_obj=cadence_obj,
@@ -73,11 +79,12 @@ def train(run_dir):
                          every_other=10)
     val_loader = DataLoader(val_dataset, batch_size=1, collate_fn=collate_fn,
                             shuffle=True)
-    epochs = 1000
-    model = NeuralProcess(hidden_dim=16, latent_dim=16).cuda()
+    epochs = 250
+    model = NeuralProcess(hidden_dim=32, latent_dim=64, weight_y_loss=0.1).cuda()
     model.train()
     optim = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, factor=0.5, patience=10, verbose=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, factor=0.5,
+                                                           patience=10, verbose=True)
     writer = SummaryWriter(run_dir)
     for epoch in tqdm(range(epochs)):
         train_single_epoch(model, train_loader, optim, epoch, writer)
@@ -91,16 +98,17 @@ def train(run_dir):
 
 
 def train_single_epoch(model, train_loader, optim, epoch, writer):
-    total_loss, kl_loss, mse_loss = 0.0, 0.0, 0.0
+    total_loss, kl_loss, mse_loss, meta_loss = 0.0, 0.0, 0.0, 0.0
     model.train()
     for i, data in enumerate(train_loader):
-        context_x, context_y, target_x, target_y = data
+        context_x, context_y, target_x, target_y, meta = data
         context_x = context_x.cuda()
         context_y = context_y.cuda()
         target_x = target_x.cuda()
         target_y = target_y.cuda()
+        meta = meta.cuda()
         # pass through the latent model
-        y_pred, losses, extra = model(context_x, context_y, target_x, target_y)
+        y_pred, losses, extra = model(context_x, context_y, target_x, target_y, meta)
         loss = losses['loss']
         # Training step
         optim.zero_grad()
@@ -110,29 +118,33 @@ def train_single_epoch(model, train_loader, optim, epoch, writer):
         total_loss += (loss - total_loss)/(i+1)
         kl_loss += (losses['loss_kl'] - kl_loss)/(i+1)
         mse_loss += (losses['loss_mse'] - mse_loss)/(i+1)
+        meta_loss += (losses['loss_meta'] - meta_loss)/(i+1)
     writer.add_scalars('training_loss',
                        {'loss': total_loss, 'kl': kl_loss,
-                        'mse': losses['loss_mse']},
+                        'mse': losses['loss_mse'],
+                        'meta': losses['loss_meta']},
                        epoch)
 
 
 def eval(model, val_loader, optim, epoch, writer):
-    total_loss, kl_loss, mse_loss = 0.0, 0.0, 0.0
+    total_loss, kl_loss, mse_loss, meta_loss = 0.0, 0.0, 0.0, 0.0
     model.eval()
     with torch.no_grad():
         for i, data in enumerate(val_loader):
-            context_x, context_y, target_x, target_y = data
+            context_x, context_y, target_x, target_y, meta = data
             context_x = context_x.cuda()
             context_y = context_y.cuda()
             target_x = target_x.cuda()
             target_y = target_y.cuda()
+            meta = meta.cuda()
             # pass through the latent model
-            pred_y, losses, extra = model(context_x, context_y, target_x, target_y)
+            pred_y, losses, extra = model(context_x, context_y, target_x, target_y, meta)
             loss = losses['loss']
             # Logging
             total_loss += (loss - total_loss)/(i+1)
             kl_loss += (losses['loss_kl'] - kl_loss)/(i+1)
             mse_loss += (losses['loss_mse'] - mse_loss)/(i+1)
+            meta_loss += (losses['loss_meta'] - meta_loss)/(i+1)
         # Visualize fit on last light curve
         pred_y, _, extra = model(context_x, context_y, target_x, None)
     pred_y = pred_y.squeeze().cpu().numpy()
@@ -145,7 +157,8 @@ def eval(model, val_loader, optim, epoch, writer):
     writer.add_figure('fit', fig, global_step=epoch)
     writer.add_scalars('val_loss',
                        {'loss': total_loss, 'kl': kl_loss,
-                        'mse': losses['loss_mse']},
+                        'mse': losses['loss_mse'],
+                        'meta': losses['loss_meta']},
                        epoch)
     return total_loss
 
@@ -177,10 +190,11 @@ def test(checkpoint_path):
     model.eval()
     with torch.no_grad():
         for i, d in enumerate(dloader):
-            context_x, context_y, target_x, target_y = d
+            context_x, context_y, target_x, target_y, meta = d
             context_x = context_x.cuda()
             context_y = context_y.cuda()
             target_x = target_x.cuda()
+            meta = meta.cuda()
             pred_y, _, extra = model(context_x, context_y, target_x, None)
             pred_y = pred_y.squeeze().cpu().numpy()
             std_y = extra['y_dist'].scale.squeeze().cpu().numpy()
@@ -216,6 +230,6 @@ def get_fig(pred_y, std_y, context_x, context_y, target_x, target_y):
 
 
 if __name__ == '__main__':
-    run_dir = os.path.join('results', 'E1')
+    run_dir = os.path.join('results', 'E2')
     train(run_dir)
     # test(os.path.join(run_dir, 'checkpoint.pth.tar'))

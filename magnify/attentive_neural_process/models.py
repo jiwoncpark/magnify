@@ -1,3 +1,9 @@
+"""Taken with minor modifications from
+
+https://github.com/3springs/attentive-neural-processes/blob/af431a267bad309b2d5698f25551986e2c4e7815/neural_processes/models/neural_process/model.py
+
+"""
+
 import math
 import numpy as np
 import torch
@@ -208,34 +214,31 @@ class ParamDecoder(nn.Module):
         use_lstm=False,
     ):
         super(ParamDecoder, self).__init__()
-        self._target_transform = nn.Linear(x_dim, hidden_dim)
-        if use_deterministic_path:
-            hidden_dim_2 = 2 * hidden_dim + latent_dim
-        else:
-            hidden_dim_2 = hidden_dim + latent_dim
-
-        if use_lstm:
-            self._decoder = LSTMBlock(hidden_dim_2, hidden_dim_2, batchnorm=batchnorm,
-                                      dropout=dropout, num_layers=n_decoder_layers)
-        else:
-            self._decoder = BatchMLP(hidden_dim_2, hidden_dim_2, batchnorm=batchnorm,
-                                     dropout=dropout, num_layers=n_decoder_layers)
-        self._mean = nn.Linear(hidden_dim_2, n_target)
-        self._std = nn.Linear(hidden_dim_2, n_target)
-        self._use_deterministic_path = use_deterministic_path
+        # self._target_transform = nn.Linear(x_dim, hidden_dim)
+        self._decoder = nn.Sequential(nn.Linear(latent_dim, hidden_dim),
+                                      nn.ReLU(),
+                                      nn.Linear(hidden_dim, hidden_dim),
+                                      nn.ReLU(),
+                                      nn.Linear(hidden_dim, hidden_dim),
+                                      nn.LayerNorm(hidden_dim))
+        self._mean = nn.Linear(hidden_dim, n_target)
+        self._std = nn.Linear(hidden_dim, n_target)
+        # self._use_deterministic_path = use_deterministic_path
         self._min_std = min_std
         self._use_lvar = use_lvar
 
     def forward(self, r, z, target_x):
         # concatenate target_x and representation
-        x = self._target_transform(target_x)
+        # x = self._target_transform(target_x)
+        # print("x: ", x.shape)
 
-        if self._use_deterministic_path:
-            z = torch.cat([r, z], dim=-1)
+        # if self._use_deterministic_path:
+        #    z = torch.cat([r, z], dim=-1)
+        #    print("r: ", r.shape)
 
-        r = torch.cat([z, x], dim=-1)
+        # r = torch.cat([z, x], dim=-1)
 
-        r = self._decoder(r)
+        r = self._decoder(z)
 
         # Get the mean and the variance
         mean = self._mean(r)
