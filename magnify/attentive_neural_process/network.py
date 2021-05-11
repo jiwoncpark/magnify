@@ -1,8 +1,16 @@
+"""Taken with minor modifications from
+
+https://github.com/3springs/attentive-neural-processes/blob/af431a267bad309b2d5698f25551986e2c4e7815/neural_processes/models/neural_process/model.py
+
+"""
+
 import torch
 from torch import nn
 import torch.nn.functional as F
 from magnify.attentive_neural_process.modules.layers import BatchNormSequence
-from magnify.attentive_neural_process.models import LatentEncoder, DeterministicEncoder, Decoder
+from magnify.attentive_neural_process.models import (LatentEncoder,
+                                                     DeterministicEncoder,
+                                                     Decoder, ParamDecoder)
 from magnify.attentive_neural_process.utils import kl_loss_var, log_prob_sigma
 from magnify.attentive_neural_process.utils import hparams_power
 
@@ -17,7 +25,7 @@ class NeuralProcess(nn.Module):
     def __init__(self,
                  x_dim=1,  # features in input
                  y_dim=1,  # number of features in output
-                 n_target=2,
+                 n_target=1,
                  hidden_dim=32,  # size of hidden space
                  latent_dim=32,  # size of latent space
                  # type of attention: "uniform", "dot", "multihead" "ptmultihead":
@@ -29,6 +37,7 @@ class NeuralProcess(nn.Module):
                  n_det_encoder_layers=2,  # number of deterministic encoder layers
                  n_decoder_layers=2,
                  use_deterministic_path=True,
+                 weight_y_loss=1.0,
                  # To avoid collapse use a minimum standard deviation,
                  # should be much smaller than variation in labels
                  min_std=0.001,
@@ -125,9 +134,22 @@ class NeuralProcess(nn.Module):
         self._use_deterministic_path = use_deterministic_path
         self._use_lvar = use_lvar
 
-        # self._param_decoder = ParamDecoder(n_target=n_target)
+        self._param_decoder = ParamDecoder(x_dim,
+                                           n_target=n_target,
+                                           hidden_dim=hidden_dim,
+                                           latent_dim=latent_dim,
+                                           dropout=dropout,
+                                           batchnorm=batchnorm,
+                                           min_std=min_std,
+                                           use_lvar=use_lvar,
+                                           n_decoder_layers=n_decoder_layers,
+                                           use_deterministic_path=use_deterministic_path,
+                                           use_lstm=use_lstm_d
+                                           )
+        self._weight_y_loss = weight_y_loss
 
-    def forward(self, context_x, context_y, target_x, target_y=None, sample_latent=None):
+    def forward(self, context_x, context_y, target_x, target_y=None,
+                target_meta=None, sample_latent=None,):
         if sample_latent is None:
             sample_latent = self.training
 
@@ -161,7 +183,7 @@ class NeuralProcess(nn.Module):
             z = dist_prior.rsample() if sample_latent else dist_prior.loc
 
         num_targets = target_x.size(1)
-        z = z.unsqueeze(1).repeat(1, num_targets, 1)  # [B, T_target, H]
+        z_repeated = z.unsqueeze(1).repeat(1, num_targets, 1)  # [B, T_target, H]
 
         if self._use_deterministic_path:
             r = self._deterministic_encoder(context_x, context_y,
@@ -169,9 +191,10 @@ class NeuralProcess(nn.Module):
         else:
             r = None
 
-        dist, log_sigma = self._decoder(r, z, target_x)
-        if target_y is not None:
+        dist, log_sigma = self._decoder(r, z_repeated, target_x)
+        dist_meta, log_sigma_meta = self._param_decoder(r, z, target_x)
 
+        if target_y is not None:
             if self._use_lvar:
                 log_p = log_prob_sigma(target_y, dist.loc, log_sigma).mean(-1)  # [B, T_target, Y].mean(-1)
                 if self.context_in_target:
@@ -189,15 +212,21 @@ class NeuralProcess(nn.Module):
             mse_loss = F.mse_loss(dist.loc, target_y, reduction='none')[:, :context_x.size(1)].mean()
             loss_p = -log_p
 
+            # For meta parameter regression
+            precision = torch.exp(-log_sigma_meta*2.0)
+            loss_meta = precision * (target_meta - dist_meta.loc)**2.0 + log_sigma_meta*2.0
+            loss_meta = torch.sum(loss_meta, dim=1)
+
+            # Final loss
+            loss = ((loss_kl - log_p).mean(1)*self._weight_y_loss + loss_meta).mean()
+
             # Weight loss nearer to prediction time?
             weight = (torch.arange(loss_p.shape[1]) + 1).float().to(device)[None, :]
             loss_p_weighted = loss_p / torch.sqrt(weight)  # We want to  weight nearer stuff more
-
             loss_p_weighted = loss_p_weighted.mean()
-            loss = (loss_kl - log_p).mean()
             loss_kl = loss_kl.mean()
-            log_p = log_p.mean()
             loss_p = loss_p.mean()
+            loss_meta = loss_meta.mean()
 
         else:
             loss_p = None
@@ -205,6 +234,10 @@ class NeuralProcess(nn.Module):
             loss_kl = None
             loss = None
             loss_p_weighted = None
+            loss_meta = None
 
         y_pred = dist.rsample() if self.training else dist.loc
-        return y_pred, dict(loss=loss, loss_p=loss_p, loss_kl=loss_kl, loss_mse=mse_loss, loss_p_weighted=loss_p_weighted), dict(log_sigma=log_sigma, y_dist=dist)
+        return (y_pred,
+                dict(loss=loss, loss_p=loss_p, loss_kl=loss_kl, loss_mse=mse_loss,
+                     loss_p_weighted=loss_p_weighted, loss_meta=loss_meta),
+                dict(log_sigma=log_sigma, y_dist=dist))

@@ -1,3 +1,10 @@
+"""Taken with minor modifications from
+
+https://github.com/3springs/attentive-neural-processes/blob/af431a267bad309b2d5698f25551986e2c4e7815/neural_processes/modules/modules.py
+
+"""
+
+
 from torch import nn
 
 
