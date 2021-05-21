@@ -47,7 +47,7 @@ class NeuralProcess(nn.Module):
                  batchnorm=False,
                  use_lvar=False,  # Alternative loss calculation, may be more stable
                  attention_layers=2,
-                 use_rnn=True,  # use RNN/LSTM?
+                 use_rnn=False,  # use RNN/LSTM?
                  use_lstm_le=False,  # use another LSTM in latent encoder instead of MLP
                  use_lstm_de=False,  # use another LSTM in determinstic encoder instead of MLP
                  use_lstm_d=False,  # use another lstm in decoder instead of MLP
@@ -63,8 +63,8 @@ class NeuralProcess(nn.Module):
         # Sometimes input normalisation can be important,
         # an initial batch norm is a nice way to ensure this
         # https://stackoverflow.com/a/46772183/221742
-        self.norm_x = BatchNormSequence(x_dim, affine=False)
-        self.norm_y = BatchNormSequence(y_dim, affine=False)
+        # self.norm_x = BatchNormSequence(x_dim, affine=False)
+        # self.norm_y = BatchNormSequence(y_dim, affine=False)
 
         if self._use_rnn:
             self._lstm_x = nn.LSTM(
@@ -157,9 +157,9 @@ class NeuralProcess(nn.Module):
 
         # if self.hparams.get('bnorm_inputs', True):
         # https://stackoverflow.com/a/46772183/221742
-        target_x = self.norm_x(target_x)
-        context_x = self.norm_x(context_x)
-        context_y = self.norm_y(context_y)
+        # target_x = self.norm_x(target_x)
+        # context_x = self.norm_x(context_x)
+        # context_y = self.norm_y(context_y)
 
         if self._use_rnn:
             # see https://arxiv.org/abs/1910.09323 where x is substituted with h = RNN(x)
@@ -171,10 +171,10 @@ class NeuralProcess(nn.Module):
         dist_prior, log_var_prior = self._latent_encoder(context_x, context_y)
 
         if (target_y is not None):
-            target_y2 = self.norm_y(target_y)
+            #target_y2 = self.norm_y(target_y)
             if self._use_rnn:
-                target_y2, _ = self._lstm_y(target_y2)
-            dist_post, log_var_post = self._latent_encoder(target_x, target_y2)
+                target_y2, _ = self._lstm_y(target_y)
+            dist_post, log_var_post = self._latent_encoder(target_x, target_y)
             if self.training:
                 z = dist_post.rsample() if sample_latent else dist_post.loc
             else:
@@ -192,7 +192,7 @@ class NeuralProcess(nn.Module):
             r = None
 
         dist, log_sigma = self._decoder(r, z_repeated, target_x)
-        dist_meta, log_sigma_meta = self._param_decoder(r, z, target_x)
+        mean_meta, log_sigma_meta = self._param_decoder(r, z, target_x)
 
         if target_y is not None:
             if self._use_lvar:
@@ -201,21 +201,23 @@ class NeuralProcess(nn.Module):
                     log_p[:, :context_x.size(1)] /= 100
                 loss_kl = kl_loss_var(dist_prior.loc, log_var_prior,
                                       dist_post.loc, log_var_post).mean(-1)  # [B, R].mean(-1)
-            else:
+            else:  # default method
                 log_p = dist.log_prob(target_y).mean(-1)
                 if self.context_in_target:
-                    log_p[:, :context_x.size(1)] /= 100 # There's the temptation for it to fit only on context, where it knows the answer, and learn very low uncertainty.
+                    # There's the temptation for it to fit only on context,
+                    # where it knows the answer, and learn very low uncertainty.
+                    log_p[:, :context_x.size(1)] /= 100
                 loss_kl = torch.distributions.kl_divergence(
                     dist_post, dist_prior).mean(-1)  # [B, R].mean(-1)
 
             loss_kl = loss_kl[:, None].expand(log_p.shape)
-            mse_loss = F.mse_loss(dist.loc, target_y, reduction='none')[:, :context_x.size(1)].mean()
+            mse_loss = F.mse_loss(dist.loc, target_y, reduction='none').mean()
             loss_p = -log_p
 
             # For meta parameter regression
             precision = torch.exp(-log_sigma_meta*2.0)
-            loss_meta = precision * (target_meta - dist_meta.loc)**2.0 + log_sigma_meta*2.0
-            loss_meta = torch.sum(loss_meta, dim=1)
+            loss_meta = precision * (target_meta - mean_meta)**2.0 + log_sigma_meta*2.0
+            loss_meta = torch.mean(loss_meta, dim=1)
 
             # Final loss
             loss = ((loss_kl - log_p).mean(1)*self._weight_y_loss + loss_meta).mean()
@@ -240,4 +242,5 @@ class NeuralProcess(nn.Module):
         return (y_pred,
                 dict(loss=loss, loss_p=loss_p, loss_kl=loss_kl, loss_mse=mse_loss,
                      loss_p_weighted=loss_p_weighted, loss_meta=loss_meta),
-                dict(log_sigma=log_sigma, y_dist=dist))
+                dict(log_sigma=log_sigma, y_dist=dist,
+                     log_sigma_meta=log_sigma_meta, mean_meta=mean_meta))
