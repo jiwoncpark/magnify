@@ -135,7 +135,7 @@ class DeterministicEncoder(nn.Module):
             d_encoded = self._self_attention(d_encoded, d_encoded, d_encoded)
 
         # Apply attention as mean aggregation
-        h = self._cross_attention(context_x, d_encoded, target_x)
+        h = self._cross_attention(context_x, d_encoded, target_x)  # [B, T_target, H]
 
         return h
 
@@ -195,6 +195,7 @@ class Decoder(nn.Module):
             sigma = self._min_std + (1 - self._min_std) * F.softplus(log_sigma)
 
         dist = torch.distributions.Normal(mean, sigma)
+
         return dist, log_sigma
 
 
@@ -215,7 +216,7 @@ class ParamDecoder(nn.Module):
     ):
         super(ParamDecoder, self).__init__()
         # self._target_transform = nn.Linear(x_dim, hidden_dim)
-        self._decoder = nn.Sequential(nn.Linear(latent_dim, hidden_dim),
+        self._decoder = nn.Sequential(nn.Linear(hidden_dim + latent_dim, hidden_dim),
                                       nn.ReLU(),
                                       nn.Linear(hidden_dim, hidden_dim),
                                       nn.ReLU(),
@@ -235,21 +236,12 @@ class ParamDecoder(nn.Module):
         # if self._use_deterministic_path:
         #    z = torch.cat([r, z], dim=-1)
         #    print("r: ", r.shape)
-
-        # r = torch.cat([z, x], dim=-1)
-
-        r = self._decoder(z)
+        r = torch.mean(r, dim=1)  # [B, H]
+        r = torch.cat([z, r], dim=-1)  # [B, L + H]
+        r = self._decoder(r)
 
         # Get the mean and the variance
         mean = self._mean(r)
         log_sigma = self._std(r)
 
-        # Bound or clamp the variance
-        if self._use_lvar:
-            log_sigma = torch.clamp(log_sigma, math.log(self._min_std), -math.log(self._min_std))
-            sigma = torch.exp(log_sigma)
-        else:
-            sigma = self._min_std + (1 - self._min_std) * F.softplus(log_sigma)
-
-        dist = torch.distributions.Normal(mean, sigma)
-        return dist, log_sigma
+        return mean, log_sigma
