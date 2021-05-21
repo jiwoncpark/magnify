@@ -46,14 +46,12 @@ class BatchNormSequence(nn.Module):
 class NPBlockRelu2d(nn.Module):
     """Block for Neural Processes."""
 
-    def __init__(
-        self, in_channels, out_channels, dropout=0, batchnorm=False, bias=False
-    ):
+    def __init__(self, in_channels, out_channels, dropout=0, batchnorm=False, bias=False):
         super().__init__()
         self.linear = nn.Linear(in_channels, out_channels, bias=bias)
         self.act = nn.ReLU()
         self.dropout = nn.Dropout2d(dropout)
-        self.norm = nn.BatchNorm2d(out_channels) if batchnorm else False
+        self.norm = nn.LayerNorm(out_channels) if batchnorm else False
 
     def forward(self, x):
         # x.shape is (Batch, Sequence, Channels)
@@ -62,13 +60,13 @@ class NPBlockRelu2d(nn.Module):
 
         # Now we want to apply batchnorm and dropout to the channels. So we put it in shape
         # (Batch, Channels, Sequence, None) so we can use Dropout2d & BatchNorm2d
-        x = x.permute(0, 2, 1)[:, :, :, None]
+        #x = x.permute(0, 2, 1)[:, :, :, None]
 
         if self.norm:
             x = self.norm(x)
 
-        x = self.dropout(x)
-        return x[:, :, :, 0].permute(0, 2, 1)
+        #x = self.dropout(x)
+        return x  # x[:, :, :, 0].permute(0, 2, 1)
 
 
 class BatchMLP(nn.Module):
@@ -82,9 +80,7 @@ class BatchMLP(nn.Module):
         tensor of shape [B,n,d_out] where d_out=output_size
     """
 
-    def __init__(
-        self, input_size, output_size, num_layers=2, dropout=0, batchnorm=False
-    ):
+    def __init__(self, input_size, output_size, num_layers=2, dropout=0, batchnorm=False):
         super().__init__()
         self.input_size = input_size
         self.output_size = output_size
