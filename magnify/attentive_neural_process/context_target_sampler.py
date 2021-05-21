@@ -33,16 +33,19 @@ class GetRandomObservations:
         return idx
 
 
-def collate_fn_opsim(batch, rng, cadence_obj, n_pointings, every_other=10):
+def collate_fn_opsim(batch, rng, cadence_obj, n_pointings, every_other=10,
+                     exclude_ddf=True):
     x, y, meta = zip(*batch)  # batch ~ list of (x, y, param) tuples
-    x = torch.stack(x, axis=0)  # [batch_size, n_points, 1]
-    y = torch.stack(y, axis=0)  # [batch_size, n_points, 1]
+    x = torch.stack(x, axis=0)  # [batch_size, n_points, n_filters]
+    y = torch.stack(y, axis=0)  # [batch_size, n_points, n_filters]
     meta = torch.stack(meta, axis=0)  # [batch_size, n_params]
     n_full_x = x.shape[1]
     obs_i = rng.choice(n_pointings)
+    if exclude_ddf:
+        while len(cadence_obj.get_mjd_single_pointing(obs_i, rounded=True)) > 1500:
+            obs_i = rng.choice(n_pointings)
+    context_i = cadence_obj.get_mjd_single_pointing(obs_i, rounded=True).astype(np.int32)
     every_other_10 = np.arange(0, n_full_x, every_other)
-    context_i = cadence_obj.get_mjd_single_pointing(obs_i,
-                                                    rounded=True).astype(np.int32)
     target_i = np.union1d(context_i, every_other_10)
     return (x[:, context_i, :], y[:, context_i, :],
             x[:, target_i, :], y[:, target_i, :],
