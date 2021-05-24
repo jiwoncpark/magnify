@@ -19,11 +19,13 @@ class LSTMBlock(nn.Module):
                 num_layers=num_layers,
                 dropout=dropout,
                 batch_first=True,
+                bidirectional=True,
                 bias=bias
         )
 
     def forward(self, x):
-        return self._lstm(x)[0]
+        out = self._lstm(x)[0]
+        return out
 
 
 class BatchNormSequence(nn.Module):

@@ -7,6 +7,7 @@ https://github.com/3springs/attentive-neural-processes/blob/af431a267bad309b2d56
 import torch
 from torch import nn
 import torch.nn.functional as F
+from magnify.losses.gaussian_nll import DoubleGaussianNLL
 from magnify.attentive_neural_process.modules.layers import BatchNormSequence
 from magnify.attentive_neural_process.models import (LatentEncoder,
                                                      DeterministicEncoder,
@@ -134,8 +135,10 @@ class NeuralProcess(nn.Module):
         self._use_deterministic_path = use_deterministic_path
         self._use_lvar = use_lvar
 
+        self._param_loss = DoubleGaussianNLL(n_target, device=torch.device('cuda:0'))
+
         self._param_decoder = ParamDecoder(x_dim,
-                                           n_target=n_target,
+                                           n_target=self._param_loss.out_dim,
                                            hidden_dim=hidden_dim,
                                            latent_dim=latent_dim,
                                            dropout=dropout,
@@ -153,7 +156,7 @@ class NeuralProcess(nn.Module):
         if sample_latent is None:
             sample_latent = self.training
 
-        device = next(self.parameters()).device
+        #device = next(self.parameters()).device
 
         # if self.hparams.get('bnorm_inputs', True):
         # https://stackoverflow.com/a/46772183/221742
@@ -192,7 +195,7 @@ class NeuralProcess(nn.Module):
             r = None
 
         dist, log_sigma = self._decoder(r, z_repeated, target_x)
-        mean_meta, log_sigma_meta = self._param_decoder(r, z, target_x)
+        pred_meta = self._param_decoder(r, z, target_x)
 
         if target_y is not None:
             if self._use_lvar:
@@ -202,30 +205,24 @@ class NeuralProcess(nn.Module):
                 loss_kl = kl_loss_var(dist_prior.loc, log_var_prior,
                                       dist_post.loc, log_var_post).mean(-1)  # [B, R].mean(-1)
             else:  # default method
-                log_p = dist.log_prob(target_y).mean(-1)
+                log_p = dist.log_prob(target_y).mean(-1).mean(-1)  # [B, T_target, Y].mean(-1).mean(-1)
                 if self.context_in_target:
                     # There's the temptation for it to fit only on context,
                     # where it knows the answer, and learn very low uncertainty.
                     log_p[:, :context_x.size(1)] /= 100
                 loss_kl = torch.distributions.kl_divergence(
                     dist_post, dist_prior).mean(-1)  # [B, R].mean(-1)
-
-            loss_kl = loss_kl[:, None].expand(log_p.shape)
+            # Components of time series regression loss
             mse_loss = F.mse_loss(dist.loc, target_y, reduction='none').mean()
             loss_p = -log_p
-
             # For meta parameter regression
-            precision = torch.exp(-log_sigma_meta*2.0)
-            loss_meta = precision * (target_meta - mean_meta)**2.0 + log_sigma_meta*2.0
-            loss_meta = torch.mean(loss_meta, dim=1)
-
+            loss_meta = self._param_loss(pred_meta, target_meta)
             # Final loss
-            loss = ((loss_kl - log_p).mean(1)*self._weight_y_loss + loss_meta).mean()
-
+            loss = ((loss_kl + loss_p)*self._weight_y_loss + loss_meta).mean()
             # Weight loss nearer to prediction time?
-            weight = (torch.arange(loss_p.shape[1]) + 1).float().to(device)[None, :]
-            loss_p_weighted = loss_p / torch.sqrt(weight)  # We want to  weight nearer stuff more
-            loss_p_weighted = loss_p_weighted.mean()
+            #weight = (torch.arange(loss_p.shape[1]) + 1).float().to(device)[None, :]
+            #loss_p_weighted = loss_p / torch.sqrt(weight)  # We want to  weight nearer stuff more
+            #loss_p_weighted = loss_p_weighted.mean()
             loss_kl = loss_kl.mean()
             loss_p = loss_p.mean()
             loss_meta = loss_meta.mean()
@@ -235,12 +232,16 @@ class NeuralProcess(nn.Module):
             mse_loss = None
             loss_kl = None
             loss = None
-            loss_p_weighted = None
+            #loss_p_weighted = None
             loss_meta = None
 
         y_pred = dist.rsample() if self.training else dist.loc
         return (y_pred,
                 dict(loss=loss, loss_p=loss_p, loss_kl=loss_kl, loss_mse=mse_loss,
-                     loss_p_weighted=loss_p_weighted, loss_meta=loss_meta),
-                dict(log_sigma=log_sigma, y_dist=dist,
-                     log_sigma_meta=log_sigma_meta, mean_meta=mean_meta))
+                     #loss_p_weighted=loss_p_weighted,
+                     loss_meta=loss_meta
+                     ),
+                dict(log_sigma=log_sigma, y_dist=dist)
+                     #log_sigma_meta=log_sigma_meta,
+                     #mean_meta=mean_meta
+                )

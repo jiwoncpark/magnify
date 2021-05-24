@@ -33,11 +33,19 @@ class LatentEncoder(nn.Module):
         super().__init__()
         # self._input_layer = nn.Linear(input_dim, hidden_dim)
         if use_lstm:
-            self._encoder = LSTMBlock(input_dim, hidden_dim, batchnorm=batchnorm,
+            self._encoder = LSTMBlock(input_dim, hidden_dim//2, batchnorm=batchnorm,
                                       dropout=dropout, num_layers=n_encoder_layers)
         else:
             self._encoder = BatchMLP(input_dim, hidden_dim, batchnorm=batchnorm,
                                      dropout=dropout, num_layers=n_encoder_layers)
+
+        self._aggregator = nn.LSTM(input_size=hidden_dim,
+                                   hidden_size=hidden_dim//2,
+                                   num_layers=1,
+                                   dropout=dropout,
+                                   batch_first=True,
+                                   bidirectional=True,
+                                   bias=False)
         if use_self_attn:
             self._self_attention = Attention(
                 hidden_dim,
@@ -58,17 +66,17 @@ class LatentEncoder(nn.Module):
         encoder_input = torch.cat([x, y], dim=-1)
 
         # Pass final axis through MLP
-        encoded = self._encoder(encoder_input)
+        out = self._encoder(encoder_input)
 
         # Aggregator: take the mean over all points
         if self._use_self_attn:
-            attention_output = self._self_attention(encoded, encoded, encoded)
-            mean_repr = attention_output.mean(dim=1)
-        else:
-            mean_repr = encoded.mean(dim=1)
+            out = self._self_attention(out, out, out)  # [B, n_target, H]
+
+        o, (h, c) = self._aggregator(out)  # o is [B, n_target, H]
+        out = o[:, -1, :]  # [B, H]
 
         # Have further MLP layers that map to the parameters of the Gaussian latent
-        mean_repr = torch.relu(self._penultimate_layer(mean_repr))
+        mean_repr = torch.relu(self._penultimate_layer(out))
 
         # Then apply further linear layers to output latent mu and log sigma
         mean = self._mean(mean_repr)
@@ -220,10 +228,9 @@ class ParamDecoder(nn.Module):
                                       nn.ReLU(),
                                       nn.Linear(hidden_dim, hidden_dim),
                                       nn.ReLU(),
-                                      nn.Linear(hidden_dim, hidden_dim),
-                                      nn.LayerNorm(hidden_dim))
-        self._mean = nn.Linear(hidden_dim, n_target)
-        self._std = nn.Linear(hidden_dim, n_target)
+                                      nn.Linear(hidden_dim, n_target))
+        # self._mean = nn.Linear(hidden_dim, n_target)
+        # self._std = nn.Linear(hidden_dim, n_target)
         # self._use_deterministic_path = use_deterministic_path
         self._min_std = min_std
         self._use_lvar = use_lvar
@@ -241,7 +248,7 @@ class ParamDecoder(nn.Module):
         r = self._decoder(r)
 
         # Get the mean and the variance
-        mean = self._mean(r)
-        log_sigma = self._std(r)
+        # mean = self._mean(r)
+        # log_sigma = self._std(r)
 
-        return mean, log_sigma
+        return r
