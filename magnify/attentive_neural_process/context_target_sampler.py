@@ -39,6 +39,7 @@ def collate_fn_opsim(batch, rng, cadence_obj, n_pointings, every_other=10,
     x = torch.stack(x, axis=0)  # [batch_size, n_points, n_filters]
     y = torch.stack(y, axis=0)  # [batch_size, n_points, n_filters]
     meta = torch.stack(meta, axis=0)  # [batch_size, n_params]
+    # Log-parameterize some params
     n_full_x = x.shape[1]
     obs_i = rng.choice(n_pointings)
     if exclude_ddf:
@@ -49,4 +50,22 @@ def collate_fn_opsim(batch, rng, cadence_obj, n_pointings, every_other=10,
     target_i = np.union1d(context_i, every_other_10)
     return (x[:, context_i, :], y[:, context_i, :],
             x[:, target_i, :], y[:, target_i, :],
+            meta)
+
+
+def collate_fn_multi_filter(batch, rng, cadence_obj, n_pointings, every_other=10,
+                            exclude_ddf=True):
+    x, y, meta = zip(*batch)  # batch ~ list of (x, y, param) tuples
+    x = torch.stack(x, axis=0)  # [batch_size, n_points, n_filters]
+    y = torch.stack(y, axis=0)  # [batch_size, n_points, n_filters]
+    meta = torch.stack(meta, axis=0)  # [batch_size, n_params]
+    # Log-parameterize some params
+    obs_i = rng.choice(n_pointings)
+    if exclude_ddf:
+        while len(cadence_obj.get_mjd_single_pointing(obs_i, rounded=True)) > 1500:
+            obs_i = rng.choice(n_pointings)
+    mjd = torch.from_numpy(cadence_obj.get_mjd_single_pointing(obs_i, rounded=True).astype(np.int32))
+    mask_c = torch.from_numpy(cadence_obj.get_mask_single_pointing(obs_i))  # [n_points, n_filters]
+    mask_t = torch.from_numpy(rng.choice([True, False], size=mask_c.shape, p=[0.1, 0.9]))
+    return (x, y, mjd, mask_c, mask_t,
             meta)
