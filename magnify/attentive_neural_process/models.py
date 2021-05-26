@@ -226,8 +226,10 @@ class ParamDecoder(nn.Module):
         # self._target_transform = nn.Linear(x_dim, hidden_dim)
         self._decoder = nn.Sequential(nn.Linear(hidden_dim + latent_dim, hidden_dim),
                                       nn.ReLU(),
+                                      nn.Dropout(dropout),
                                       nn.Linear(hidden_dim, hidden_dim),
                                       nn.ReLU(),
+                                      nn.Dropout(dropout),
                                       nn.Linear(hidden_dim, n_target))
         # self._mean = nn.Linear(hidden_dim, n_target)
         # self._std = nn.Linear(hidden_dim, n_target)
