@@ -241,7 +241,8 @@ class NeuralProcess(nn.Module):
                      #loss_p_weighted=loss_p_weighted,
                      loss_meta=loss_meta
                      ),
-                dict(log_sigma=log_sigma, y_dist=dist)
+                dict(log_sigma=log_sigma, y_dist=dist,
+                     pred_meta=pred_meta)
                      #log_sigma_meta=log_sigma_meta,
                      #mean_meta=mean_meta
                 )
