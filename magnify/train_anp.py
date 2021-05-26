@@ -8,79 +8,65 @@ plt.switch_backend('agg')
 from tensorboardX import SummaryWriter
 import torch
 from magnificat.drw_dataset import DRWDataset
+from magnificat.samplers.dc2_sampler import DC2Sampler
 from magnificat.cadence import LSSTCadence
 from torch.utils.data import DataLoader
 from magnify.attentive_neural_process.network import NeuralProcess
 from magnify.attentive_neural_process.context_target_sampler import collate_fn_opsim
 
 
-class Sampler:
-    def __init__(self, seed, bandpasses):
-        random.seed(seed)
-        np.random.seed(seed)
-        self.bandpasses = bandpasses
-
-    def sample(self):
-        sample_dict = dict()
-        for bp in self.bandpasses:
-            SF_inf = np.maximum(np.random.randn()*0.05 + 0.2, 0.001)
-            # SF_inf = 10**(np.random.randn(N)*(0.25) + -0.8)
-            # SF_inf = np.ones(N)*0.15
-            # tau = 10.0**np.maximum(np.random.randn(N)*0.5 + 2.0, 0.1)
-            tau = np.maximum(np.random.randn()*50.0 + 200.0, 10.0)
-            # mag = np.maximum(np.random.randn(N) + 19.0, 17.5)
-            mag = 0.0
-            # z = np.maximum(np.random.randn(N) + 2.0, 0.5)
-            sample_dict[f'tau_{bp}'] = tau
-            sample_dict[f'SF_inf_{bp}'] = SF_inf
-            sample_dict[f'mag_{bp}'] = mag
-        sample_dict['redshift'] = 2.0
-        sample_dict['M_i'] = -25.0
-        sample_dict['BH_mass'] = 10.0
-        return sample_dict
-
-
-def train(run_dir):
+def train(run_dir, train_params, bandpasses, log_params,
+          n_train=10000, n_val=50, n_pointings=1000,
+          checkpoint_path=None):
     torch.cuda.empty_cache()
     os.makedirs(run_dir, exist_ok=True)
     train_seed = 123
-    train_dataset = DRWDataset(Sampler(train_seed, ['i']), 'train_drw',
-                               num_samples=10000,
+    n_agn = 11441
+    cat_idx = np.arange(n_agn)
+    np.random.default_rng(train_seed).shuffle(cat_idx)
+    train_cat_idx = cat_idx[: n_train]
+    val_cat_idx = cat_idx[-n_val:]
+    train_dataset = DRWDataset(DC2Sampler(train_seed, bandpasses, train_cat_idx), 'train_drw',
+                               num_samples=n_train,
                                seed=train_seed,
                                shift_x=-3650*0.5,
                                rescale_x=1.0/(3650*0.5)*4.0,
                                delta_x=1.0,
                                max_x=3650.0,
-                               err_y=0.001)
-    train_dataset.slice_params = [train_dataset.param_names.index(n) for n in ['tau_i', 'SF_inf_i']]
+                               err_y=0.01)
+    np.savetxt(os.path.join('train_drw', 'train_cat_idx.txt'), train_cat_idx, fmt='%i')
+    train_dataset.slice_params = [train_dataset.param_names.index(n) for n in train_params]
+    train_dataset.log_params = log_params
+    train_dataset.get_normalizing_metadata(set_metadata=True)
     print(train_dataset.slice_params)
     print(train_dataset.mean_params, train_dataset.std_params)
     # Generate pointings
     cadence_obj = LSSTCadence('obs', train_seed)
-    n_pointings = 100
     ra, dec = cadence_obj.get_pointings(n_pointings)
     cadence_obj.get_obs_info(ra, dec)
-    cadence_obj.set_bandpasses(['i'])
+    cadence_obj.set_bandpasses(bandpasses)
     # Define collate fn that samples context points based on pointings
     collate_fn = partial(collate_fn_opsim,
                          rng=np.random.default_rng(train_seed),
                          cadence_obj=cadence_obj,
                          n_pointings=n_pointings,
                          every_other=10,
-                         exclude_ddf=True)
-    train_loader = DataLoader(train_dataset, batch_size=50, collate_fn=collate_fn,
+                         exclude_ddf=True,)
+    train_loader = DataLoader(train_dataset, batch_size=40, collate_fn=collate_fn,
                               shuffle=True)
     # Validation data
     val_seed = 456
-    val_dataset = DRWDataset(Sampler(val_seed, ['i']), 'train_drw',
-                             num_samples=20,
-                             seed=train_seed,
+    val_dataset = DRWDataset(DC2Sampler(val_seed, bandpasses, val_cat_idx), 'val_drw',
+                             num_samples=n_val,
+                             seed=val_seed,
                              shift_x=-3650*0.5,
                              rescale_x=1.0/(3650*0.5)*4.0,
                              delta_x=1.0,
                              max_x=3650.0,
-                             err_y=0.001)
+                             err_y=0.01)
+    np.savetxt(os.path.join('val_drw', 'val_cat_idx.txt'), val_cat_idx, fmt='%i')
     val_dataset.slice_params = train_dataset.slice_params
+    val_dataset.log_params = log_params
     val_dataset.mean_params = train_dataset.mean_params
     val_dataset.std_params = train_dataset.std_params
     collate_fn = partial(collate_fn_opsim,
@@ -88,16 +74,25 @@ def train(run_dir):
                          cadence_obj=cadence_obj,
                          n_pointings=n_pointings,
                          every_other=10)
-    val_loader = DataLoader(val_dataset, batch_size=20, collate_fn=collate_fn,
+    val_loader = DataLoader(val_dataset, batch_size=n_val, collate_fn=collate_fn,
                             shuffle=True)
-    epochs = 250
-    model = NeuralProcess(hidden_dim=64, latent_dim=32, weight_y_loss=0.1,
+    epochs = 400
+    model = NeuralProcess(x_dim=len(bandpasses),
+                          y_dim=len(bandpasses),
+                          hidden_dim=64, latent_dim=32, weight_y_loss=10.0,
                           n_target=len(train_dataset.slice_params),
                           batchnorm=True).cuda()
-    model.train()
     optim = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, factor=0.5,
                                                            patience=20, verbose=True)
+    if checkpoint_path is not None:
+        state = torch.load(checkpoint_path)
+        model.load_state_dict(state['model'])
+        optim.load_state_dict(state['optimizer'])
+        scheduler.load_state_dict(state['scheduler'])
+        # scheduler.patience = 10
+        # print(scheduler.__dict__)
+    model.train()
     min_val_loss = np.inf
     writer = SummaryWriter(run_dir)
     for epoch in tqdm(range(epochs)):
@@ -136,8 +131,7 @@ def train_single_epoch(model, train_loader, optim, epoch, writer):
         mse_loss += (losses['loss_mse'] - mse_loss)/(i+1)
         meta_loss += (losses['loss_meta'] - meta_loss)/(i+1)
     writer.add_scalars('training_loss',
-                       {'loss': total_loss, 'kl': kl_loss,
-                        'mse': losses['loss_mse'],
+                       {'loss': total_loss,
                         'meta': losses['loss_meta']},
                        epoch)
 
@@ -161,71 +155,36 @@ def eval(model, val_loader, optim, epoch, writer):
             kl_loss += (losses['loss_kl'] - kl_loss)/(i+1)
             mse_loss += (losses['loss_mse'] - mse_loss)/(i+1)
             meta_loss += (losses['loss_meta'] - meta_loss)/(i+1)
-        for p in range(meta.shape[1]):
-            fig = get_params_fig(extra['mean_meta'].cpu().numpy()[:, p],
-                                 extra['log_sigma_meta'].cpu().numpy()[:, p],
-                                 meta.cpu().numpy()[:, p])
-            writer.add_figure(f'param {p} recovery', fig, global_step=epoch)
+        if False:
+            for p in range(meta.shape[1]):
+                fig = get_params_fig(extra['mean_meta'].cpu().numpy()[:, p],
+                                     extra['log_sigma_meta'].cpu().numpy()[:, p],
+                                     meta.cpu().numpy()[:, p])
+                writer.add_figure(f'param {p} recovery', fig, global_step=epoch)
+        # Get histogram of errors
+        if True:
+            model._param_loss.set_trained_pred(extra['pred_meta'])
+            sample = model._param_loss.sample(mean=torch.zeros([1, meta.shape[1]]).cuda(),
+                                              std=torch.ones([1, meta.shape[1]]).cuda(),
+                                              n_samples=100).mean(1)  # [n_batch, Y_dim]
+            error = np.mean(sample - meta.cpu().numpy(), axis=-1)
+            writer.add_histogram('Mean error', error, epoch)
         # Visualize fit on first light curve
-        pred_y, _, extra = model(context_x[0:1], context_y[0:1], target_x[0:1], None)
-        pred_y = pred_y.squeeze().cpu().numpy().squeeze()
-        std_y = extra['y_dist'].scale.squeeze().cpu().numpy().squeeze()
-        target_x = target_x.cpu().numpy()[0:1].squeeze()
-        target_y = target_y.cpu().numpy()[0:1].squeeze()
-        context_x = context_x.cpu().numpy()[0:1].squeeze()
-        context_y = context_y.cpu().numpy()[0:1].squeeze()
-        fig = get_light_curve_fig(pred_y, std_y, context_x, context_y, target_x, target_y)
-        writer.add_figure('fit', fig, global_step=epoch)
+        if True:
+            pred_y, _, extra = model(context_x[0:1], context_y[0:1], target_x[0:1], None)
+            pred_y = pred_y.cpu().numpy()[0, :, 3]
+            std_y = extra['y_dist'].scale.cpu().numpy()[0, :, 3]
+            target_x = target_x.cpu().numpy()[0, :, 3]
+            target_y = target_y.cpu().numpy()[0, :, 3]
+            context_x = context_x.cpu().numpy()[0, :, 3]
+            context_y = context_y.cpu().numpy()[0, :, 3]
+            fig = get_light_curve_fig(pred_y, std_y, context_x, context_y, target_x, target_y)
+            writer.add_figure('fit', fig, global_step=epoch)
     writer.add_scalars('val_loss',
-                       {'loss': total_loss, 'kl': kl_loss,
-                        'mse': losses['loss_mse'],
+                       {'loss': total_loss,
                         'meta': losses['loss_meta']},
                        epoch)
     return total_loss
-
-
-def test(checkpoint_path):
-    state_dict = torch.load(checkpoint_path)
-    model = NeuralProcess(hidden_dim=8, latent_dim=8).cuda()
-    model.load_state_dict(state_dict=state_dict['model'])
-    test_seed = 789
-    test_dataset = DRWDataset(Sampler(test_seed), 'test_drw',
-                              num_samples=8,
-                              seed=test_seed,
-                              shift_x=-3650*0.5,
-                              rescale_x=1.0/(3650*0.5)*4.0,
-                              delta_x=1.0,
-                              max_x=3650.0,
-                              err_y=0.01)
-    cadence_obj = LSSTCadence('obs', test_seed)
-    rng = np.random.default_rng(test_seed)
-    # Define collate fn that samples context points based on pointings
-    collate_fn = partial(collate_fn_opsim,
-                         rng=rng,
-                         cadence_obj=cadence_obj,
-                         n_pointings=10,
-                         every_other=10)
-    dloader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn,
-                         shuffle=False)
-
-    model.eval()
-    with torch.no_grad():
-        for i, d in enumerate(dloader):
-            context_x, context_y, target_x, target_y, meta = d
-            context_x = context_x.cuda()
-            context_y = context_y.cuda()
-            target_x = target_x.cuda()
-            meta = meta.cuda()
-            pred_y, _, extra = model(context_x, context_y, target_x, None)
-            pred_y = pred_y.squeeze().cpu().numpy()
-            std_y = extra['y_dist'].scale.squeeze().cpu().numpy()
-            target_x = target_x.squeeze().cpu().numpy()
-            target_y = target_y.squeeze().cpu().numpy()
-            context_x = context_x.squeeze().cpu().numpy()
-            context_y = context_y.squeeze().cpu().numpy()
-            fig = get_light_curve_fig(pred_y, std_y, context_x, context_y, target_x, target_y)
-            fig.savefig('light_curve.png')
-            break
 
 
 def get_params_fig(pred_mean, pred_log_sigma, truth):
@@ -260,6 +219,19 @@ def get_light_curve_fig(pred_y, std_y, context_x, context_y, target_x, target_y)
 
 
 if __name__ == '__main__':
-    run_dir = os.path.join('results', 'E4')
-    train(run_dir)
+    run_dir = os.path.join('results', 'E0')
+    bandpasses = list('ugrizy')
+    train_params = [f'tau_{bp}' for bp in bandpasses]
+    train_params += [f'SF_inf_{bp}' for bp in bandpasses]
+    train_params += ['BH_mass', 'M_i', 'redshift']
+    train_params += [f'mag_{bp}' for bp in bandpasses]
+    log_params = [True for bp in bandpasses]
+    log_params += [True for bp in bandpasses]
+    log_params += [False, False, False]
+    log_params += [False for bp in bandpasses]
+
+    train(run_dir, train_params, bandpasses, n_train=11000, n_val=50,
+          n_pointings=1000, log_params=log_params,
+          #checkpoint_path=os.path.join(run_dir, 'checkpoint.pth.tar')
+          )
     # test(os.path.join(run_dir, 'checkpoint.pth.tar'))
