@@ -34,7 +34,7 @@ class GetRandomObservations:
 
 
 def collate_fn_opsim(batch, rng, cadence_obj, n_pointings, every_other=10,
-                     exclude_ddf=True, pointings_band=3):
+                     exclude_ddf=True):
     x, y, meta = zip(*batch)  # batch ~ list of (x, y, param) tuples
     x = torch.stack(x, axis=0)  # [batch_size, n_points, n_filters]
     y = torch.stack(y, axis=0)  # [batch_size, n_points, n_filters]
@@ -48,9 +48,28 @@ def collate_fn_opsim(batch, rng, cadence_obj, n_pointings, every_other=10,
     context_i = cadence_obj.get_mjd_single_pointing(obs_i, rounded=True).astype(np.int32)  # [n_points,]
     every_other_10 = np.arange(0, n_full_x, every_other)
     target_i = np.union1d(context_i, every_other_10)
+    target_i.sort()
     return (x[:, context_i, :], y[:, context_i, :],
             x[:, target_i, :], y[:, target_i, :],
             meta)
+
+
+def collate_fn_baseline(batch, rng, cadence_obj, n_pointings, every_other=10,
+                        exclude_ddf=True, pointings_band=3):
+    x, y, meta = zip(*batch)  # batch ~ list of (x, y, param) tuples
+    x = torch.stack(x, axis=0)  # [batch_size, n_points, n_filters]
+    y = torch.stack(y, axis=0)  # [batch_size, n_points, n_filters]
+    meta = torch.stack(meta, axis=0).float()  # [batch_size, n_params]
+    # Log-parameterize some params
+    obs_i = rng.choice(n_pointings)
+    if exclude_ddf:
+        while len(cadence_obj.get_mjd_single_pointing(obs_i, rounded=True)) > 1500:
+            obs_i = rng.choice(n_pointings)
+    context_i = cadence_obj.get_mjd_single_pointing(obs_i, rounded=True).astype(np.int32)  # [n_points,]
+    # Compute summary stats
+    flux_mean = torch.mean(y[:, context_i, :], dim=1)  # [batch_size, n_filters]
+    flux_std = torch.std(y[:, context_i, :], dim=1)  # [batch_size, n_filters]
+    return (flux_mean, flux_std, meta)
 
 
 def collate_fn_multi_filter(batch, rng, cadence_obj, n_pointings, every_other=10,

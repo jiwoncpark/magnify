@@ -33,8 +33,8 @@ def train(run_dir, train_params, bandpasses, log_params,
                                rescale_x=1.0/(3650*0.5)*4.0,
                                delta_x=1.0,
                                max_x=3650.0,
-                               err_y=0.01)
-    np.savetxt(os.path.join('train_drw', 'train_cat_idx.txt'), train_cat_idx, fmt='%i')
+                               err_y=0.01,
+                               bandpasses=bandpasses)
     train_dataset.slice_params = [train_dataset.param_names.index(n) for n in train_params]
     train_dataset.log_params = log_params
     train_dataset.get_normalizing_metadata(set_metadata=True)
@@ -52,7 +52,7 @@ def train(run_dir, train_params, bandpasses, log_params,
                          n_pointings=n_pointings,
                          every_other=10,
                          exclude_ddf=True,)
-    train_loader = DataLoader(train_dataset, batch_size=40, collate_fn=collate_fn,
+    train_loader = DataLoader(train_dataset, batch_size=20, collate_fn=collate_fn,
                               shuffle=True)
     # Validation data
     val_seed = 456
@@ -63,8 +63,8 @@ def train(run_dir, train_params, bandpasses, log_params,
                              rescale_x=1.0/(3650*0.5)*4.0,
                              delta_x=1.0,
                              max_x=3650.0,
-                             err_y=0.01)
-    np.savetxt(os.path.join('val_drw', 'val_cat_idx.txt'), val_cat_idx, fmt='%i')
+                             err_y=0.01,
+                             bandpasses=bandpasses)
     val_dataset.slice_params = train_dataset.slice_params
     val_dataset.log_params = log_params
     val_dataset.mean_params = train_dataset.mean_params
@@ -75,29 +75,37 @@ def train(run_dir, train_params, bandpasses, log_params,
                          n_pointings=n_pointings,
                          every_other=10)
     val_loader = DataLoader(val_dataset, batch_size=n_val, collate_fn=collate_fn,
-                            shuffle=True)
+                            shuffle=False)
     epochs = 400
     model = NeuralProcess(x_dim=len(bandpasses),
                           y_dim=len(bandpasses),
-                          hidden_dim=64, latent_dim=32, weight_y_loss=10.0,
+                          hidden_dim=32, latent_dim=32, weight_y_loss=1.0,
                           n_target=len(train_dataset.slice_params),
-                          batchnorm=True).cuda()
+                          ).cuda()
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print("Trainable params: ", total_params)
     optim = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, factor=0.5,
-                                                           patience=20, verbose=True)
+                                                           patience=15, verbose=True)
     if checkpoint_path is not None:
         state = torch.load(checkpoint_path)
         model.load_state_dict(state['model'])
         optim.load_state_dict(state['optimizer'])
         scheduler.load_state_dict(state['scheduler'])
-        # scheduler.patience = 10
+        scheduler.patience = 10
+        def get_lr(gamma, optimizer):
+            return [group['lr'] * gamma
+                    for group in optimizer.param_groups]
+        for param_group, lr in zip(optim.param_groups, get_lr(0.2, optim)):
+            param_group['lr'] = lr
+
         # print(scheduler.__dict__)
     model.train()
     min_val_loss = np.inf
     writer = SummaryWriter(run_dir)
     for epoch in tqdm(range(epochs)):
-        train_single_epoch(model, train_loader, optim, epoch, writer)
-        val_loss = eval(model, val_loader, optim, epoch, writer)
+        train_single_epoch(model, train_loader, val_loader, optim, epoch, writer)
+        val_loss = eval(model, val_loader, epoch, writer, log=False)
         scheduler.step(val_loss)
         # Save model if validation loss decreased
         if val_loss < min_val_loss:
@@ -108,10 +116,10 @@ def train(run_dir, train_params, bandpasses, log_params,
             min_val_loss = val_loss
 
 
-def train_single_epoch(model, train_loader, optim, epoch, writer):
-    total_loss, kl_loss, mse_loss, meta_loss = 0.0, 0.0, 0.0, 0.0
-    model.train()
+def train_single_epoch(model, train_loader, val_loader, optim, epoch, writer):
+    total_loss, mse_loss, meta_loss = 0.0, 0.0, 0.0
     for i, data in enumerate(train_loader):
+        model.train()
         optim.zero_grad()
         context_x, context_y, target_x, target_y, meta = data
         context_x = context_x.cuda()
@@ -127,17 +135,18 @@ def train_single_epoch(model, train_loader, optim, epoch, writer):
         optim.step()
         # Logging
         total_loss += (loss - total_loss)/(i+1)
-        kl_loss += (losses['loss_kl'] - kl_loss)/(i+1)
         mse_loss += (losses['loss_mse'] - mse_loss)/(i+1)
         meta_loss += (losses['loss_meta'] - meta_loss)/(i+1)
+        if i % 100 == 0:
+            eval(model, val_loader, epoch*len(train_loader)+i, writer)
     writer.add_scalars('training_loss',
                        {'loss': total_loss,
                         'meta': losses['loss_meta']},
                        epoch)
 
 
-def eval(model, val_loader, optim, epoch, writer):
-    total_loss, kl_loss, mse_loss, meta_loss = 0.0, 0.0, 0.0, 0.0
+def eval(model, val_loader, epoch, writer, log=True):
+    total_loss, mse_loss, meta_loss = 0.0, 0.0, 0.0
     model.eval()
     with torch.no_grad():
         for i, data in enumerate(val_loader):
@@ -152,7 +161,6 @@ def eval(model, val_loader, optim, epoch, writer):
             loss = losses['loss']
             # Logging
             total_loss += (loss - total_loss)/(i+1)
-            kl_loss += (losses['loss_kl'] - kl_loss)/(i+1)
             mse_loss += (losses['loss_mse'] - mse_loss)/(i+1)
             meta_loss += (losses['loss_meta'] - meta_loss)/(i+1)
         if False:
@@ -162,28 +170,30 @@ def eval(model, val_loader, optim, epoch, writer):
                                      meta.cpu().numpy()[:, p])
                 writer.add_figure(f'param {p} recovery', fig, global_step=epoch)
         # Get histogram of errors
-        if True:
-            model._param_loss.set_trained_pred(extra['pred_meta'])
-            sample = model._param_loss.sample(mean=torch.zeros([1, meta.shape[1]]).cuda(),
-                                              std=torch.ones([1, meta.shape[1]]).cuda(),
-                                              n_samples=100).mean(1)  # [n_batch, Y_dim]
+        if log:
+            model.param_loss.set_trained_pred(extra['pred_meta'])
+            sample = model.param_loss.sample(mean=torch.zeros([1, meta.shape[1]]).cuda(),
+                                             std=torch.ones([1, meta.shape[1]]).cuda(),
+                                             n_samples=100).mean(1)  # [n_batch, Y_dim]
             error = np.mean(sample - meta.cpu().numpy(), axis=-1)
             writer.add_histogram('Mean error', error, epoch)
         # Visualize fit on first light curve
-        if True:
+        if log:
+            bp_i = 0
             pred_y, _, extra = model(context_x[0:1], context_y[0:1], target_x[0:1], None)
-            pred_y = pred_y.cpu().numpy()[0, :, 3]
-            std_y = extra['y_dist'].scale.cpu().numpy()[0, :, 3]
-            target_x = target_x.cpu().numpy()[0, :, 3]
-            target_y = target_y.cpu().numpy()[0, :, 3]
-            context_x = context_x.cpu().numpy()[0, :, 3]
-            context_y = context_y.cpu().numpy()[0, :, 3]
+            pred_y = pred_y.cpu().numpy()[0, :, bp_i]
+            std_y = extra['y_dist'].scale.cpu().numpy()[0, :, bp_i]
+            target_x = target_x.cpu().numpy()[0, :, bp_i]
+            target_y = target_y.cpu().numpy()[0, :, bp_i]
+            context_x = context_x.cpu().numpy()[0, :, bp_i]
+            context_y = context_y.cpu().numpy()[0, :, bp_i]
             fig = get_light_curve_fig(pred_y, std_y, context_x, context_y, target_x, target_y)
             writer.add_figure('fit', fig, global_step=epoch)
-    writer.add_scalars('val_loss',
-                       {'loss': total_loss,
-                        'meta': losses['loss_meta']},
-                       epoch)
+        if log:
+            writer.add_scalars('val_loss',
+                               {'loss': total_loss,
+                                'meta': losses['loss_meta']},
+                           epoch)
     return total_loss
 
 
@@ -197,11 +207,10 @@ def get_params_fig(pred_mean, pred_log_sigma, truth):
 
 
 def get_light_curve_fig(pred_y, std_y, context_x, context_y, target_x, target_y):
-    fig, ax = plt.subplots()
-    target_sorted_i = np.argsort(target_x)
-    target_x = target_x[target_sorted_i]
-    pred_y = pred_y[target_sorted_i]
-    std_y = std_y[target_sorted_i]
+    fig, ax = plt.subplots(figsize=(10, 5))
+    target_x = target_x
+    pred_y = pred_y
+    std_y = std_y
     ax.scatter(target_x, pred_y, marker='.', color='tab:blue')
     ax.fill_between(target_x,
                     pred_y - std_y,
@@ -211,15 +220,14 @@ def get_light_curve_fig(pred_y, std_y, context_x, context_y, target_x, target_y)
                     interpolate=True,
                     label="uncertainty",
                     )
-    target_y = target_y[target_sorted_i]
     ax.scatter(target_x, target_y, marker='.', color='k', label='target')
     ax.scatter(context_x, context_y, marker='*', color='tab:orange', label='context')
-    ax.legend()
+    #ax.legend()
     return fig
 
 
 if __name__ == '__main__':
-    run_dir = os.path.join('results', 'E0')
+    run_dir = os.path.join('results', 'E1')
     bandpasses = list('ugrizy')
     train_params = [f'tau_{bp}' for bp in bandpasses]
     train_params += [f'SF_inf_{bp}' for bp in bandpasses]
@@ -232,6 +240,6 @@ if __name__ == '__main__':
 
     train(run_dir, train_params, bandpasses, n_train=11000, n_val=50,
           n_pointings=1000, log_params=log_params,
-          #checkpoint_path=os.path.join(run_dir, 'checkpoint.pth.tar')
+          checkpoint_path=os.path.join(run_dir, 'checkpoint.pth.tar')
           )
     # test(os.path.join(run_dir, 'checkpoint.pth.tar'))
