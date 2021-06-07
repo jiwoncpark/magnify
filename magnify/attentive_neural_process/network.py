@@ -1,4 +1,4 @@
-"""Taken with minor modifications from
+""""Modified from the great implementation in
 
 https://github.com/3springs/attentive-neural-processes/blob/af431a267bad309b2d5698f25551986e2c4e7815/neural_processes/models/neural_process/model.py
 
@@ -7,7 +7,7 @@ https://github.com/3springs/attentive-neural-processes/blob/af431a267bad309b2d56
 import torch
 from torch import nn
 import torch.nn.functional as F
-from magnify.losses.gaussian_nll import DoubleGaussianNLL
+from magnify.losses.gaussian_nll import FullRankGaussianNLL
 from magnify.attentive_neural_process.modules.layers import BatchNormSequence
 from magnify.attentive_neural_process.models import (LatentEncoder,
                                                      DeterministicEncoder,
@@ -26,7 +26,7 @@ class NeuralProcess(nn.Module):
     def __init__(self,
                  x_dim=1,  # features in input
                  y_dim=1,  # number of features in output
-                 n_target=1,
+                 n_target=2,
                  hidden_dim=32,  # size of hidden space
                  latent_dim=32,  # size of latent space
                  # type of attention: "uniform", "dot", "multihead" "ptmultihead":
@@ -48,7 +48,7 @@ class NeuralProcess(nn.Module):
                  batchnorm=False,
                  use_lvar=False,  # Alternative loss calculation, may be more stable
                  attention_layers=2,
-                 use_rnn=False,  # use RNN/LSTM?
+                 use_rnn=True,  # use RNN/LSTM?
                  use_lstm_le=False,  # use another LSTM in latent encoder instead of MLP
                  use_lstm_de=False,  # use another LSTM in determinstic encoder instead of MLP
                  use_lstm_d=False,  # use another lstm in decoder instead of MLP
@@ -64,8 +64,8 @@ class NeuralProcess(nn.Module):
         # Sometimes input normalisation can be important,
         # an initial batch norm is a nice way to ensure this
         # https://stackoverflow.com/a/46772183/221742
-        # self.norm_x = BatchNormSequence(x_dim, affine=False)
-        # self.norm_y = BatchNormSequence(y_dim, affine=False)
+        self.norm_x = BatchNormSequence(x_dim, affine=False)
+        self.norm_y = BatchNormSequence(y_dim, affine=False)
 
         if self._use_rnn:
             self._lstm_x = nn.LSTM(
@@ -118,51 +118,48 @@ class NeuralProcess(nn.Module):
             use_lstm=use_lstm_de,
         )
 
-        self._decoder = Decoder(
-            x_dim,
-            y_dim,
-            hidden_dim=hidden_dim,
-            latent_dim=latent_dim,
-            dropout=dropout,
-            batchnorm=batchnorm,
-            min_std=min_std,
-            use_lvar=use_lvar,
-            n_decoder_layers=n_decoder_layers,
-            use_deterministic_path=use_deterministic_path,
-            use_lstm=use_lstm_d,
-
-        )
-        self._use_deterministic_path = use_deterministic_path
-        self._use_lvar = use_lvar
-
-        self._param_loss = DoubleGaussianNLL(n_target, device=torch.device('cuda:0'))
+        self._decoder = Decoder(x_dim,
+                                y_dim,
+                                hidden_dim=hidden_dim,
+                                latent_dim=latent_dim,
+                                dropout=dropout,
+                                batchnorm=batchnorm,
+                                min_std=min_std,
+                                use_lvar=use_lvar,
+                                n_decoder_layers=n_decoder_layers,
+                                use_deterministic_path=use_deterministic_path,
+                                use_lstm=use_lstm_d,
+                                )
+        self.param_loss = FullRankGaussianNLL(n_target,
+                                              device=torch.device('cuda:0'))
 
         self._param_decoder = ParamDecoder(x_dim,
-                                           n_target=self._param_loss.out_dim,
+                                           y_dim,
+                                           out_dim=self.param_loss.out_dim,
                                            hidden_dim=hidden_dim,
                                            latent_dim=latent_dim,
                                            dropout=dropout,
-                                           batchnorm=batchnorm,
-                                           min_std=min_std,
-                                           use_lvar=use_lvar,
-                                           n_decoder_layers=n_decoder_layers,
-                                           use_deterministic_path=use_deterministic_path,
-                                           use_lstm=use_lstm_d
                                            )
-        self._weight_y_loss = weight_y_loss
+        self.weight_y_loss = weight_y_loss
 
-    def forward(self, context_x, context_y, target_x, target_y=None,
-                target_meta=None, sample_latent=None,):
+        self._use_deterministic_path = use_deterministic_path
+        self._use_lvar = use_lvar
+
+        # self._param_decoder = ParamDecoder(n_target=n_target)
+
+    def forward(self, context_x, context_y, target_x,
+                target_y=None, target_meta=None, sample_latent=None):
         if sample_latent is None:
             sample_latent = self.training
 
-        #device = next(self.parameters()).device
+        device = next(self.parameters()).device
+        summary = torch.mean(torch.cat([context_x, context_y], dim=-1), dim=1)  # [B, 2*Y_dim]
 
         # if self.hparams.get('bnorm_inputs', True):
         # https://stackoverflow.com/a/46772183/221742
-        # target_x = self.norm_x(target_x)
-        # context_x = self.norm_x(context_x)
-        # context_y = self.norm_y(context_y)
+        target_x = self.norm_x(target_x)
+        context_x = self.norm_x(context_x)
+        context_y = self.norm_y(context_y)
 
         if self._use_rnn:
             # see https://arxiv.org/abs/1910.09323 where x is substituted with h = RNN(x)
@@ -174,10 +171,10 @@ class NeuralProcess(nn.Module):
         dist_prior, log_var_prior = self._latent_encoder(context_x, context_y)
 
         if (target_y is not None):
-            #target_y2 = self.norm_y(target_y)
+            target_y2 = self.norm_y(target_y)
             if self._use_rnn:
-                target_y2, _ = self._lstm_y(target_y)
-            dist_post, log_var_post = self._latent_encoder(target_x, target_y)
+                target_y2, _ = self._lstm_y(target_y2)
+            dist_post, log_var_post = self._latent_encoder(target_x, target_y2)
             if self.training:
                 z = dist_post.rsample() if sample_latent else dist_post.loc
             else:
@@ -195,9 +192,10 @@ class NeuralProcess(nn.Module):
             r = None
 
         dist, log_sigma = self._decoder(r, z_repeated, target_x)
-        pred_meta = self._param_decoder(r, z, target_x)
+        pred_meta = self._param_decoder(r, z, target_x, summary)
 
         if target_y is not None:
+            # Light curve reconstruction
             if self._use_lvar:
                 log_p = log_prob_sigma(target_y, dist.loc, log_sigma).mean(-1)  # [B, T_target, Y].mean(-1)
                 if self.context_in_target:
@@ -206,43 +204,38 @@ class NeuralProcess(nn.Module):
                                       dist_post.loc, log_var_post).mean(-1)  # [B, R].mean(-1)
             else:  # default method
                 log_p = dist.log_prob(target_y).mean(-1).mean(-1)  # [B, T_target, Y].mean(-1).mean(-1)
+                # There's the temptation for it to fit only on context, where it
+                # knows the answer, and learn very low uncertainty.
                 if self.context_in_target:
-                    # There's the temptation for it to fit only on context,
-                    # where it knows the answer, and learn very low uncertainty.
                     log_p[:, :context_x.size(1)] /= 100
                 loss_kl = torch.distributions.kl_divergence(
                     dist_post, dist_prior).mean(-1)  # [B, R].mean(-1)
-            # Components of time series regression loss
-            mse_loss = F.mse_loss(dist.loc, target_y, reduction='none').mean()
-            loss_p = -log_p
+            loss_p = -log_p  # [B,]
             # For meta parameter regression
-            loss_meta = self._param_loss(pred_meta, target_meta)
+            loss_meta = self.param_loss(pred_meta, target_meta)  # [B,]
             # Final loss
-            loss = ((loss_kl + loss_p)*self._weight_y_loss + loss_meta).mean()
-            # Weight loss nearer to prediction time?
-            #weight = (torch.arange(loss_p.shape[1]) + 1).float().to(device)[None, :]
-            #loss_p_weighted = loss_p / torch.sqrt(weight)  # We want to  weight nearer stuff more
-            #loss_p_weighted = loss_p_weighted.mean()
-            loss_kl = loss_kl.mean()
-            loss_p = loss_p.mean()
-            loss_meta = loss_meta.mean()
+            loss = ((loss_kl + loss_p)*self.weight_y_loss + loss_meta).mean()
+            # Components of time series regression loss
+            loss_p = loss_p.mean()  # scalar
+            loss_meta = loss_meta.mean()  # scalar
+            loss_kl = loss_kl.mean()  # scalar
+            mse_loss = F.mse_loss(dist.loc, target_y, reduction='none').mean()  # scalar
 
         else:
-            loss_p = None
-            mse_loss = None
-            loss_kl = None
             loss = None
-            #loss_p_weighted = None
+            loss_p = None
             loss_meta = None
+            loss_kl = None
+            mse_loss = None
 
         y_pred = dist.rsample() if self.training else dist.loc
         return (y_pred,
-                dict(loss=loss, loss_p=loss_p, loss_kl=loss_kl, loss_mse=mse_loss,
-                     #loss_p_weighted=loss_p_weighted,
-                     loss_meta=loss_meta
-                     ),
-                dict(log_sigma=log_sigma, y_dist=dist,
+                dict(loss=loss,
+                     loss_p=loss_p,
+                     loss_meta=loss_meta,
+                     loss_kl=loss_kl,
+                     loss_mse=mse_loss),
+                dict(log_sigma=log_sigma,
+                     y_dist=dist,
                      pred_meta=pred_meta)
-                     #log_sigma_meta=log_sigma_meta,
-                     #mean_meta=mean_meta
                 )

@@ -1,4 +1,4 @@
-"""Taken with minor modifications from
+"""Modified from the great implementation in
 
 https://github.com/3springs/attentive-neural-processes/blob/af431a267bad309b2d5698f25551986e2c4e7815/neural_processes/modules/attention.py
 

@@ -1,8 +1,9 @@
-"""Taken with minor modifications from
+"""Modified from the great implementation in
 
 https://github.com/3springs/attentive-neural-processes/blob/af431a267bad309b2d5698f25551986e2c4e7815/neural_processes/models/neural_process/model.py
 
 """
+
 
 import math
 import numpy as np
@@ -33,19 +34,11 @@ class LatentEncoder(nn.Module):
         super().__init__()
         # self._input_layer = nn.Linear(input_dim, hidden_dim)
         if use_lstm:
-            self._encoder = LSTMBlock(input_dim, hidden_dim//2, batchnorm=batchnorm,
+            self._encoder = LSTMBlock(input_dim, hidden_dim, batchnorm=batchnorm,
                                       dropout=dropout, num_layers=n_encoder_layers)
         else:
             self._encoder = BatchMLP(input_dim, hidden_dim, batchnorm=batchnorm,
                                      dropout=dropout, num_layers=n_encoder_layers)
-
-        self._aggregator = nn.LSTM(input_size=hidden_dim,
-                                   hidden_size=hidden_dim//2,
-                                   num_layers=1,
-                                   dropout=dropout,
-                                   batch_first=True,
-                                   bidirectional=True,
-                                   bias=False)
         if use_self_attn:
             self._self_attention = Attention(
                 hidden_dim,
@@ -66,17 +59,17 @@ class LatentEncoder(nn.Module):
         encoder_input = torch.cat([x, y], dim=-1)
 
         # Pass final axis through MLP
-        out = self._encoder(encoder_input)
+        encoded = self._encoder(encoder_input)
 
         # Aggregator: take the mean over all points
         if self._use_self_attn:
-            out = self._self_attention(out, out, out)  # [B, n_target, H]
-
-        o, (h, c) = self._aggregator(out)  # o is [B, n_target, H]
-        out = o[:, -1, :]  # [B, H]
+            attention_output = self._self_attention(encoded, encoded, encoded)
+            mean_repr = attention_output.mean(dim=1)
+        else:
+            mean_repr = encoded.mean(dim=1)
 
         # Have further MLP layers that map to the parameters of the Gaussian latent
-        mean_repr = torch.relu(self._penultimate_layer(out))
+        mean_repr = torch.relu(self._penultimate_layer(mean_repr))
 
         # Then apply further linear layers to output latent mu and log sigma
         mean = self._mean(mean_repr)
@@ -114,9 +107,11 @@ class DeterministicEncoder(nn.Module):
         self._use_self_attn = use_self_attn
         # self._input_layer = nn.Linear(input_dim, hidden_dim)
         if use_lstm:
-            self._d_encoder = LSTMBlock(input_dim, hidden_dim, batchnorm=batchnorm, dropout=dropout, num_layers=n_d_encoder_layers)
+            self._d_encoder = LSTMBlock(input_dim, hidden_dim, batchnorm=batchnorm,
+                                        dropout=dropout, num_layers=n_d_encoder_layers)
         else:
-            self._d_encoder = BatchMLP(input_dim, hidden_dim, batchnorm=batchnorm, dropout=dropout, num_layers=n_d_encoder_layers)
+            self._d_encoder = BatchMLP(input_dim, hidden_dim, batchnorm=batchnorm,
+                                       dropout=dropout, num_layers=n_d_encoder_layers)
         if use_self_attn:
             self._self_attention = Attention(
                 hidden_dim,
@@ -143,7 +138,7 @@ class DeterministicEncoder(nn.Module):
             d_encoded = self._self_attention(d_encoded, d_encoded, d_encoded)
 
         # Apply attention as mean aggregation
-        h = self._cross_attention(context_x, d_encoded, target_x)  # [B, T_target, H]
+        h = self._cross_attention(context_x, d_encoded, target_x)   # [B, T_target, H]
 
         return h
 
@@ -171,9 +166,11 @@ class Decoder(nn.Module):
             hidden_dim_2 = hidden_dim + latent_dim
 
         if use_lstm:
-            self._decoder = LSTMBlock(hidden_dim_2, hidden_dim_2, batchnorm=batchnorm, dropout=dropout, num_layers=n_decoder_layers)
+            self._decoder = LSTMBlock(hidden_dim_2, hidden_dim_2, batchnorm=batchnorm,
+                                      dropout=dropout, num_layers=n_decoder_layers)
         else:
-            self._decoder = BatchMLP(hidden_dim_2, hidden_dim_2, batchnorm=batchnorm, dropout=dropout, num_layers=n_decoder_layers)
+            self._decoder = BatchMLP(hidden_dim_2, hidden_dim_2, batchnorm=batchnorm,
+                                     dropout=dropout, num_layers=n_decoder_layers)
         self._mean = nn.Linear(hidden_dim_2, y_dim)
         self._std = nn.Linear(hidden_dim_2, y_dim)
         self._use_deterministic_path = use_deterministic_path
@@ -203,7 +200,6 @@ class Decoder(nn.Module):
             sigma = self._min_std + (1 - self._min_std) * F.softplus(log_sigma)
 
         dist = torch.distributions.Normal(mean, sigma)
-
         return dist, log_sigma
 
 
@@ -211,46 +207,22 @@ class ParamDecoder(nn.Module):
     def __init__(
         self,
         x_dim,
-        n_target,
+        y_dim,
+        out_dim,
         hidden_dim=32,
         latent_dim=32,
-        n_decoder_layers=3,
-        use_deterministic_path=True,
-        min_std=0.01,
-        use_lvar=False,
-        batchnorm=False,
         dropout=0,
-        use_lstm=False,
     ):
         super(ParamDecoder, self).__init__()
-        # self._target_transform = nn.Linear(x_dim, hidden_dim)
-        self._decoder = nn.Sequential(nn.Linear(hidden_dim + latent_dim, hidden_dim),
+        self._decoder = nn.Sequential(nn.Linear(latent_dim + 2*y_dim, hidden_dim),
                                       nn.ReLU(),
                                       nn.Dropout(dropout),
                                       nn.Linear(hidden_dim, hidden_dim),
                                       nn.ReLU(),
                                       nn.Dropout(dropout),
-                                      nn.Linear(hidden_dim, n_target))
-        # self._mean = nn.Linear(hidden_dim, n_target)
-        # self._std = nn.Linear(hidden_dim, n_target)
-        # self._use_deterministic_path = use_deterministic_path
-        self._min_std = min_std
-        self._use_lvar = use_lvar
+                                      nn.Linear(hidden_dim, out_dim))
 
-    def forward(self, r, z, target_x):
-        # concatenate target_x and representation
-        # x = self._target_transform(target_x)
-        # print("x: ", x.shape)
-
-        # if self._use_deterministic_path:
-        #    z = torch.cat([r, z], dim=-1)
-        #    print("r: ", r.shape)
-        r = torch.mean(r, dim=1)  # [B, H]
-        r = torch.cat([z, r], dim=-1)  # [B, L + H]
-        r = self._decoder(r)
-
-        # Get the mean and the variance
-        # mean = self._mean(r)
-        # log_sigma = self._std(r)
-
-        return r
+    def forward(self, r, z, target_x, summary):
+        out = torch.cat([z, summary], dim=-1)  # [B, L + 2*y_dim]
+        out = self._decoder(out)
+        return out
