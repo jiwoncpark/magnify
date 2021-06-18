@@ -5,6 +5,18 @@ https://github.com/3springs/attentive-neural-processes/blob/af431a267bad309b2d56
 """
 
 from torch import nn
+from torch import Tensor
+import torch.nn.functional as F
+
+
+class MCDropout(nn.Dropout):
+    def forward(self, input: Tensor) -> Tensor:
+        return F.dropout(input, self.p, True, self.inplace)
+
+
+class MCDropout2d(nn.Dropout2d):
+    def forward(self, input: Tensor) -> Tensor:
+        return F.dropout2d(input, self.p, True, self.inplace)
 
 
 class LSTMBlock(nn.Module):
@@ -51,7 +63,7 @@ class NPBlockRelu2d(nn.Module):
         super().__init__()
         self.linear = nn.Linear(in_channels, out_channels, bias=bias)
         self.act = nn.ReLU()
-        self.dropout = nn.Dropout2d(dropout)
+        self.dropout2d = MCDropout2d(dropout)
         self.norm = nn.BatchNorm2d(out_channels) if batchnorm else False
 
     def forward(self, x):
@@ -66,7 +78,7 @@ class NPBlockRelu2d(nn.Module):
         if self.norm:
             x = self.norm(x)
 
-        x = self.dropout(x)
+        x = self.dropout2d(x)
         return x[:, :, :, 0].permute(0, 2, 1)
 
 

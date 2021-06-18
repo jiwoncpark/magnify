@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-from magnify.attentive_neural_process.modules.layers import BatchMLP, LSTMBlock
+from magnify.attentive_neural_process.modules.layers import BatchMLP, LSTMBlock, MCDropout
 from magnify.attentive_neural_process.modules.attention import Attention
 
 
@@ -76,8 +76,10 @@ class LatentEncoder(nn.Module):
         log_var = self._log_var(mean_repr)
 
         if self._use_lvar:
-            # Clip it in the log domain, so it can only approach self.min_std, this helps avoid mode collapase
-            # 2 ways, a better but untested way using the more stable log domain, and the way from the deepmind repo
+            # Clip it in the log domain, so it can only approach self.min_std,
+            # this helps avoid mode collapase
+            # 2 ways, a better but untested way using the more stable log domain,
+            # and the way from the deepmind repo
             log_var = F.logsigmoid(log_var)
             log_var = torch.clamp(log_var, np.log(self._min_std), -np.log(self._min_std))
             sigma = torch.exp(0.5 * log_var)
@@ -216,10 +218,10 @@ class ParamDecoder(nn.Module):
         super(ParamDecoder, self).__init__()
         self._decoder = nn.Sequential(nn.Linear(latent_dim + 2*y_dim, hidden_dim),
                                       nn.ReLU(),
-                                      nn.Dropout(dropout),
+                                      MCDropout(dropout),
                                       nn.Linear(hidden_dim, hidden_dim),
                                       nn.ReLU(),
-                                      nn.Dropout(dropout),
+                                      MCDropout(dropout),
                                       nn.Linear(hidden_dim, out_dim))
 
     def forward(self, r, z, target_x, summary):

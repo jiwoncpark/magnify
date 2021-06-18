@@ -42,9 +42,9 @@ class NeuralProcess(nn.Module):
                  # To avoid collapse use a minimum standard deviation,
                  # should be much smaller than variation in labels
                  min_std=0.001,
-                 dropout=0,
+                 dropout=0.01,
                  use_self_attn=False,
-                 attention_dropout=0,
+                 attention_dropout=0.01,
                  batchnorm=False,
                  use_lvar=False,  # Alternative loss calculation, may be more stable
                  attention_layers=2,
@@ -152,7 +152,7 @@ class NeuralProcess(nn.Module):
         if sample_latent is None:
             sample_latent = self.training
 
-        device = next(self.parameters()).device
+        # device = next(self.parameters()).device
         summary = torch.mean(torch.cat([context_x, context_y], dim=-1), dim=1)  # [B, 2*Y_dim]
 
         # if self.hparams.get('bnorm_inputs', True):
