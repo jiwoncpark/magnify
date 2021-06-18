@@ -73,13 +73,14 @@ def train(run_dir, train_params, bandpasses, log_params,
                          rng=np.random.default_rng(val_seed),
                          cadence_obj=cadence_obj,
                          n_pointings=n_pointings,
-                         every_other=10)
+                         every_other=10,
+                         exclude_ddf=True,)
     val_loader = DataLoader(val_dataset, batch_size=n_val, collate_fn=collate_fn,
                             shuffle=False)
     epochs = 400
     model = NeuralProcess(x_dim=len(bandpasses),
                           y_dim=len(bandpasses),
-                          hidden_dim=32, latent_dim=32, weight_y_loss=1.0,
+                          hidden_dim=32, latent_dim=64, weight_y_loss=1.0,
                           n_target=len(train_dataset.slice_params),
                           ).cuda()
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -193,7 +194,7 @@ def eval(model, val_loader, epoch, writer, log=True):
             writer.add_scalars('val_loss',
                                {'loss': total_loss,
                                 'meta': losses['loss_meta']},
-                           epoch)
+                               epoch)
     return total_loss
 
 
@@ -240,6 +241,6 @@ if __name__ == '__main__':
 
     train(run_dir, train_params, bandpasses, n_train=11000, n_val=50,
           n_pointings=1000, log_params=log_params,
-          checkpoint_path=os.path.join(run_dir, 'checkpoint.pth.tar')
+          #checkpoint_path=os.path.join(run_dir, 'checkpoint.pth.tar')
           )
     # test(os.path.join(run_dir, 'checkpoint.pth.tar'))
