@@ -16,16 +16,13 @@ from magnify.attentive_neural_process.context_target_sampler import collate_fn_o
 
 
 def train(run_dir, train_params, bandpasses, log_params,
-          n_train=10000, n_val=50, n_pointings=1000,
+          train_cat_idx, val_cat_idx, n_pointings=1000,
           checkpoint_path=None):
     torch.cuda.empty_cache()
     os.makedirs(run_dir, exist_ok=True)
     train_seed = 123
-    n_agn = 11441
-    cat_idx = np.arange(n_agn)
-    np.random.default_rng(train_seed).shuffle(cat_idx)
-    train_cat_idx = cat_idx[: n_train]
-    val_cat_idx = cat_idx[-n_val:]
+    n_train = len(train_cat_idx)
+    n_val = len(val_cat_idx)
     train_dataset = DRWDataset(DC2Sampler(train_seed, bandpasses, train_cat_idx), 'train_drw',
                                num_samples=n_train,
                                seed=train_seed,
@@ -50,7 +47,7 @@ def train(run_dir, train_params, bandpasses, log_params,
                          rng=np.random.default_rng(train_seed),
                          cadence_obj=cadence_obj,
                          n_pointings=n_pointings,
-                         every_other=10,
+                         frac_context=0.9,
                          exclude_ddf=True,)
     train_loader = DataLoader(train_dataset, batch_size=20, collate_fn=collate_fn,
                               shuffle=True)
@@ -69,25 +66,26 @@ def train(run_dir, train_params, bandpasses, log_params,
     val_dataset.log_params = log_params
     val_dataset.mean_params = train_dataset.mean_params
     val_dataset.std_params = train_dataset.std_params
-    collate_fn = partial(collate_fn_opsim,
-                         rng=np.random.default_rng(val_seed),
-                         cadence_obj=cadence_obj,
-                         n_pointings=n_pointings,
-                         every_other=10,
-                         exclude_ddf=True,)
-    val_loader = DataLoader(val_dataset, batch_size=n_val, collate_fn=collate_fn,
+    collate_fn_val = partial(collate_fn_opsim,
+                             rng=np.random.default_rng(val_seed),
+                             cadence_obj=cadence_obj,
+                             n_pointings=n_pointings,
+                             frac_context=0.9,
+                             exclude_ddf=True,)
+    val_loader = DataLoader(val_dataset, batch_size=n_val, collate_fn=collate_fn_val,
                             shuffle=False)
-    epochs = 400
+    epochs = 200
     model = NeuralProcess(x_dim=len(bandpasses),
                           y_dim=len(bandpasses),
-                          hidden_dim=32, latent_dim=64, weight_y_loss=1.0,
+                          use_self_attn=False,
+                          hidden_dim=32, latent_dim=32, weight_y_loss=1.0,
                           n_target=len(train_dataset.slice_params),
                           ).cuda()
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("Trainable params: ", total_params)
     optim = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, factor=0.5,
-                                                           patience=15, verbose=True)
+                                                           patience=5, verbose=True)
     if checkpoint_path is not None:
         state = torch.load(checkpoint_path)
         model.load_state_dict(state['model'])
@@ -122,14 +120,16 @@ def train_single_epoch(model, train_loader, val_loader, optim, epoch, writer):
     for i, data in enumerate(train_loader):
         model.train()
         optim.zero_grad()
-        context_x, context_y, target_x, target_y, meta = data
+        context_x, context_y, target_x, target_y, meta, mask, sub_i = data
         context_x = context_x.cuda()
         context_y = context_y.cuda()
         target_x = target_x.cuda()
         target_y = target_y.cuda()
         meta = meta.cuda()
+        mask = mask.cuda()
+        sub_i = sub_i.cuda()
         # pass through the latent model
-        y_pred, losses, extra = model(context_x, context_y, target_x, target_y, meta)
+        y_pred, losses, extra = model(context_x, context_y, target_x, target_y, meta, mask, sub_i)
         loss = losses['loss']
         # Training step
         loss.backward()
@@ -151,14 +151,17 @@ def eval(model, val_loader, epoch, writer, log=True):
     model.eval()
     with torch.no_grad():
         for i, data in enumerate(val_loader):
-            context_x, context_y, target_x, target_y, meta = data
+            context_x, context_y, target_x, target_y, meta, mask, sub_i = data
             context_x = context_x.cuda()
             context_y = context_y.cuda()
             target_x = target_x.cuda()
             target_y = target_y.cuda()
             meta = meta.cuda()
+            mask = mask.cuda()
+            sub_i = sub_i.cuda()
             # pass through the latent model
-            pred_y, losses, extra = model(context_x, context_y, target_x, target_y, meta)
+            pred_y, losses, extra = model(context_x, context_y, target_x, target_y,
+                                          meta, mask, sub_i)
             loss = losses['loss']
             # Logging
             total_loss += (loss - total_loss)/(i+1)
@@ -181,7 +184,8 @@ def eval(model, val_loader, epoch, writer, log=True):
         # Visualize fit on first light curve
         if log:
             bp_i = 0
-            pred_y, _, extra = model(context_x[0:1], context_y[0:1], target_x[0:1], None)
+            pred_y, _, extra = model(context_x[0:1], context_y[0:1],
+                                     target_x[0:1], None, None, mask, sub_i)
             pred_y = pred_y.cpu().numpy()[0, :, bp_i]
             std_y = extra['y_dist'].scale.cpu().numpy()[0, :, bp_i]
             target_x = target_x.cpu().numpy()[0, :, bp_i]
@@ -228,7 +232,7 @@ def get_light_curve_fig(pred_y, std_y, context_x, context_y, target_x, target_y)
 
 
 if __name__ == '__main__':
-    run_dir = os.path.join('results', 'E1')
+    run_dir = os.path.join('results', 'E3')
     bandpasses = list('ugrizy')
     train_params = [f'tau_{bp}' for bp in bandpasses]
     train_params += [f'SF_inf_{bp}' for bp in bandpasses]
@@ -239,7 +243,10 @@ if __name__ == '__main__':
     log_params += [False, False, False]
     log_params += [False for bp in bandpasses]
 
-    train(run_dir, train_params, bandpasses, n_train=11000, n_val=50,
+    train_cat_idx = np.load('train_idx.npy')  # 11227
+    val_cat_idx = np.load('val_idx.npy')  # 114
+    train(run_dir, train_params, bandpasses,
+          train_cat_idx=train_cat_idx, val_cat_idx=val_cat_idx,
           n_pointings=1000, log_params=log_params,
           #checkpoint_path=os.path.join(run_dir, 'checkpoint.pth.tar')
           )
