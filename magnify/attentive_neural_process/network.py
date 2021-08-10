@@ -43,7 +43,7 @@ class NeuralProcess(nn.Module):
                  # should be much smaller than variation in labels
                  min_std=0.001,
                  dropout=0.01,
-                 use_self_attn=False,
+                 use_self_attn=True,
                  attention_dropout=0.01,
                  batchnorm=False,
                  use_lvar=False,  # Alternative loss calculation, may be more stable
@@ -148,9 +148,15 @@ class NeuralProcess(nn.Module):
         # self._param_decoder = ParamDecoder(n_target=n_target)
 
     def forward(self, context_x, context_y, target_x,
-                target_y=None, target_meta=None, sample_latent=None):
+                target_y=None, target_meta=None, mask=None, sub_i=None,
+                sample_latent=None, apply_mask=False):
         if sample_latent is None:
             sample_latent = self.training
+
+        # Mask out asynchronously unobserved times
+        if apply_mask:
+            mask_on_context = mask[sub_i, :]  # observed mask on context
+            context_y[:, ~mask_on_context] = 3
 
         # device = next(self.parameters()).device
         summary = torch.mean(torch.cat([context_x, context_y], dim=-1), dim=1)  # [B, 2*Y_dim]
@@ -203,7 +209,10 @@ class NeuralProcess(nn.Module):
                 loss_kl = kl_loss_var(dist_prior.loc, log_var_prior,
                                       dist_post.loc, log_var_post).mean(-1)  # [B, R].mean(-1)
             else:  # default method
-                log_p = dist.log_prob(target_y).mean(-1).mean(-1)  # [B, T_target, Y].mean(-1).mean(-1)
+                if apply_mask:
+                    log_p = dist.log_prob(target_y)[:, mask].mean(-1)  # [B, observed times and filters].mean(-1)
+                else:
+                    log_p = dist.log_prob(target_y).mean(-1).sum(-1)  # [B, T_target, Y].mean(-1).mean(-1)
                 # There's the temptation for it to fit only on context, where it
                 # knows the answer, and learn very low uncertainty.
                 if self.context_in_target:
