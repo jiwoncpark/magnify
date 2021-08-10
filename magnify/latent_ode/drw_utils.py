@@ -1,13 +1,13 @@
-import os
-import sys
-sys.path.insert(0, '.')
-from functools import partial
+"""Utility functions related to the DRWDataset data for running latent
+ODEs
+
+"""
 import numpy as np
 import torch
 from magnificat.drw_dataset import DRWDataset
 from magnificat.samplers.dc2_sampler import DC2Sampler
-from torch.utils.data import DataLoader
 import lib.utils as utils
+
 
 def get_data_min_max(records, device):
     """Get minimum and maximum for each feature (bandpass)
@@ -138,35 +138,6 @@ def variable_time_collate_fn(batch, args, device=torch.device("cpu"),
                                                 args,
                                                 data_type=data_type)
     return data_dict
-
-
-def collate_fn_opsim(batch, rng, n_pointings, frac_context=0.9,
-                     exclude_ddf=True):
-    x, y, meta = zip(*batch)  # batch ~ list of (x, y, param) tuples
-    x = torch.stack(x, dim=0)  # [batch_size, n_points, n_filters]
-    y = torch.stack(y, dim=0)  # [batch_size, n_points, n_filters]
-    meta = torch.stack(meta, dim=0).float()  # [batch_size, n_params]
-    # Log-parameterize some params
-    # n_full_x = x.shape[1]
-    obs_i = rng.choice(n_pointings)
-    if exclude_ddf:
-        while len(cadence_obj.get_mjd_single_pointing(obs_i, rounded=True)) > 1500:
-            obs_i = rng.choice(n_pointings)
-    target_i = cadence_obj.get_mjd_i_band_pointing(obs_i, rounded=True).astype(np.int32)  # [n_points,]
-    sub_i = rng.choice(np.arange(len(target_i)),
-                       size=int(len(target_i)*frac_context),
-                       replace=False)  # [n_points*frac_context,]
-    context_i = target_i[sub_i]
-    context_i.sort()
-    # every_other_10 = np.arange(0, n_full_x, every_other)
-    # target_i = np.union1d(context_i, every_other_10)
-    # target_i.sort()
-    mask = torch.from_numpy(cadence_obj.get_mask_single_pointing(obs_i)).bool()  # [n_points, n_filters]
-    return (x[:, context_i, :], y[:, context_i, :],
-            x[:, target_i, :], y[:, target_i, :],
-            meta,
-            mask,
-            torch.from_numpy(sub_i).long())
 
 
 def get_drw_datasets(train_seed, val_seed):

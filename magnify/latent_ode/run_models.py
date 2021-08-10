@@ -32,7 +32,6 @@ from lib.create_latent_ode_model import create_LatentODE_model
 from lib.parse_datasets import parse_datasets
 from lib.ode_func import ODEFunc, ODEFunc_w_Poisson
 from lib.diffeq_solver import DiffeqSolver
-from mujoco_physics import HopperPhysics
 
 from lib.utils import compute_loss_all_batches
 

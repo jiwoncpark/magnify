@@ -1,28 +1,17 @@
 ###########################
 # Latent ODEs for Irregularly-Sampled Time Series
 # Author: Yulia Rubanova
+# Modified by Ji Won Park (@jiwoncpark) for joint regression
 ###########################
 
 # Create a synthetic dataset
 from __future__ import absolute_import, division
 from __future__ import print_function
-import os
-import matplotlib
-if os.path.exists("/Users/yulia"):
-    matplotlib.use('TkAgg')
-else:
-    matplotlib.use('Agg')
-
 import numpy as np
-import numpy.random as npr
-from scipy.special import expit as sigmoid
-import pickle
 import matplotlib.pyplot as plt
-import matplotlib.image
 import torch
-import lib.utils as utils
 from torch.utils.data import Dataset
-# ======================================================================================
+
 
 def get_next_val(init, t, tmin, tmax, final = None):
     if final is None:
@@ -60,6 +49,7 @@ def assign_value_or_sample(value, sampling_interval=[0., 1.]):
     else:
         return value
 
+
 class TimeSeries:
     def __init__(self, device = torch.device("cpu")):
         self.device = device
@@ -85,7 +75,6 @@ class TimeSeries:
         # Dimension [:,:,0] is a time dimension -- do not add noise to that
         traj_list_w_noise[:,1:,0] += noise_weight * noise
         return traj_list_w_noise
-
 
 
 class Periodic_1d(TimeSeries):
@@ -141,6 +130,7 @@ class Periodic_1d(TimeSeries):
         # shape: [n_samples, 1]
         labels_list = torch.tensor(labels_list, device=self.device).unsqueeze(-1)
         return traj_list, labels_list
+
 
 class Periodic1dDataset(Dataset):
     def __init__(self, sample_traj):
