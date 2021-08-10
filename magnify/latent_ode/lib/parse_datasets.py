@@ -7,9 +7,9 @@
 
 from functools import partial
 import torch
-import lib.utils as utils
-from periodic_utils import Periodic_1d, Periodic1dDataset
-import drw_utils
+import magnify.latent_ode.lib.utils as utils
+from magnify.latent_ode.periodic_utils import Periodic_1d, Periodic1dDataset
+import magnify.latent_ode.drw_utils as drw_utils
 from torch.distributions import uniform
 from torch.utils.data import DataLoader
 

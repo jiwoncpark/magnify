@@ -1,39 +1,29 @@
 ###########################
 # Latent ODEs for Irregularly-Sampled Time Series
 # Author: Yulia Rubanova
+# Modified by Ji Won Park (@jiwoncpark) for application to AGNs
 ###########################
 
 import os
 import sys
-import matplotlib
-# matplotlib.use('TkAgg')
-import matplotlib.pyplot
 import matplotlib.pyplot as plt
-
 import time
-import datetime
 import argparse
 import numpy as np
-import pandas as pd
 from random import SystemRandom
-from sklearn import model_selection
 
 import torch
 import torch.nn as nn
-from torch.nn.functional import relu
 import torch.optim as optim
 
-import lib.utils as utils
-from lib.plotting import *
-
-from lib.rnn_baselines import *
-from lib.ode_rnn import *
-from lib.create_latent_ode_model import create_LatentODE_model
-from lib.parse_datasets import parse_datasets
-from lib.ode_func import ODEFunc, ODEFunc_w_Poisson
-from lib.diffeq_solver import DiffeqSolver
-
-from lib.utils import compute_loss_all_batches
+from magnify.latent_ode.lib.plotting import *
+from magnify.latent_ode.lib.rnn_baselines import *
+from magnify.latent_ode.lib.ode_rnn import *
+from magnify.latent_ode.lib.create_latent_ode_model import create_LatentODE_model
+from magnify.latent_ode.lib.parse_datasets import parse_datasets
+from magnify.latent_ode.lib.ode_func import ODEFunc, ODEFunc_w_Poisson
+from magnify.latent_ode.lib.diffeq_solver import DiffeqSolver
+import magnify.latent_ode.lib.utils as utils
 
 # Generative model for noisy data based on ODE
 parser = argparse.ArgumentParser('Latent ODE')
@@ -43,7 +33,7 @@ parser.add_argument('--lr',  type=float, default=1e-2, help="Starting learning r
 parser.add_argument('-b', '--batch-size', type=int, default=50)
 parser.add_argument('--viz', action='store_true', help="Show plots while training")
 
-parser.add_argument('--save', type=str, default='experiments/', help="Path for save checkpoints")
+parser.add_argument('--save', type=str, default='latent_ode_results/', help="Path for save checkpoints")
 parser.add_argument('--load', type=str, default=None, help="ID of the experiment to load for evaluation. If None, run a new experiment.")
 parser.add_argument('-r', '--random-seed', type=int, default=1991, help="Random_seed")
 
@@ -285,7 +275,7 @@ if __name__ == '__main__':
         if itr % (n_iters_to_viz * num_batches) == 0:
             with torch.no_grad():
 
-                test_res = compute_loss_all_batches(model,
+                test_res = utils.compute_loss_all_batches(model,
                                                     data_obj["test_dataloader"], args,
                     n_batches = data_obj["n_test_batches"],
                     experimentID = experimentID,

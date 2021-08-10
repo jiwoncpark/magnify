@@ -9,11 +9,15 @@
 *.png
 *.tar
 *.dat
+anp_data/
+latent_ode_data/
+*results/
 
 # C extensions
 *.so
 
 # Distribution / packaging
+in_development/
 .Python
 build/
 develop-eggs/

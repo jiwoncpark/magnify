@@ -3,16 +3,11 @@
 # Author: Yulia Rubanova
 ###########################
 
-import numpy as np
 import torch
 import torch.nn as nn
-from torch.nn.functional import relu
-import lib.utils as utils
-from torch.distributions import Categorical, Normal
-import lib.utils as utils
+import magnify.latent_ode.lib.utils as utils
 from torch.nn.modules.rnn import LSTM, GRU
-from lib.utils import get_device
-
+from magnify.latent_ode.lib.utils import get_device
 
 # GRU description: 
 # http://www.wildml.com/2015/10/recurrent-neural-network-tutorial-part-4-implementing-a-grulstm-rnn-with-python-and-theano/

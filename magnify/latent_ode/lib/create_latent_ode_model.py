@@ -3,20 +3,12 @@
 # Author: Yulia Rubanova
 ###########################
 
-import os
-import numpy as np
-
-import torch
 import torch.nn as nn
-from torch.nn.functional import relu
-
-import lib.utils as utils
-from lib.latent_ode import LatentODE
-from lib.encoder_decoder import *
-from lib.diffeq_solver import DiffeqSolver
-
-from torch.distributions.normal import Normal
-from lib.ode_func import ODEFunc, ODEFunc_w_Poisson
+import magnify.latent_ode.lib.utils as utils
+from magnify.latent_ode.lib.latent_ode import LatentODE
+from magnify.latent_ode.lib.encoder_decoder import *
+from magnify.latent_ode.lib.diffeq_solver import DiffeqSolver
+from magnify.latent_ode.lib.ode_func import ODEFunc, ODEFunc_w_Poisson
 
 #####################################################################################################
 

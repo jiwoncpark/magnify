@@ -3,40 +3,27 @@
 # Author: Yulia Rubanova
 ###########################
 
-import matplotlib
-# matplotlib.use('TkAgg')
-# matplotlib.use('Agg')
-import matplotlib.pyplot
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
 import os
-from scipy.stats import kde
-
 import numpy as np
-import subprocess
 import torch
-import lib.utils as utils
-import matplotlib.gridspec as gridspec
-from lib.utils import get_device
+import magnify.latent_ode.lib.utils as utils
+from magnify.latent_ode.lib.utils import get_device
 
-from lib.encoder_decoder import *
-from lib.rnn_baselines import *
-from lib.ode_rnn import *
+from magnify.latent_ode.lib.encoder_decoder import *
+from magnify.latent_ode.lib.rnn_baselines import *
+from magnify.latent_ode.lib.ode_rnn import *
 import torch.nn.functional as functional
 from torch.distributions.normal import Normal
-from lib.latent_ode import LatentODE
+from magnify.latent_ode.lib.latent_ode import LatentODE
 
-from lib.likelihood_eval import masked_gaussian_log_density
+from magnify.latent_ode.lib.likelihood_eval import masked_gaussian_log_density
 try:
     import umap
 except:
     print("Couldn't import umap")
-
-from generate_timeseries import Periodic_1d
-from person_activity import PersonActivity
-
-from lib.utils import compute_loss_all_batches
 
 
 SMALL_SIZE = 14

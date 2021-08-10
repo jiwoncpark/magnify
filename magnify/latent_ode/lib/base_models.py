@@ -3,22 +3,13 @@
 # Author: Yulia Rubanova
 ###########################
 
-import numpy as np
 import torch
 import torch.nn as nn
-from torch.nn.functional import relu
-
-import lib.utils as utils
-from lib.encoder_decoder import *
-from lib.likelihood_eval import *
-
-from torch.distributions.multivariate_normal import MultivariateNormal
-from torch.distributions.normal import Normal
-from torch.nn.modules.rnn import GRUCell, LSTMCell, RNNCellBase
+import magnify.latent_ode.lib.utils as utils
+from magnify.latent_ode.lib.encoder_decoder import *
+from magnify.latent_ode.lib.likelihood_eval import *
 
 from torch.distributions.normal import Normal
-from torch.distributions import Independent
-from torch.nn.parameter import Parameter
 
 
 def create_classifier(z0_dim, n_labels):
