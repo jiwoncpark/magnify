@@ -152,12 +152,12 @@ def get_drw_datasets(train_seed, val_seed):
     log_params += [False for bp in bandpasses]
     n_pointings = 1000
 
-    train_cat_idx = np.load('/home/jwp/stage/sl/latent_ode/train_idx.npy')  # 11227
-    val_cat_idx = np.load('/home/jwp/stage/sl/latent_ode/val_idx.npy')  # 114
+    train_cat_idx = np.load('/home/jwp/stage/sl/magnify/train_idx.npy')  # 11227
+    val_cat_idx = np.load('/home/jwp/stage/sl/magnify/val_idx.npy')  # 114
     n_train = len(train_cat_idx)
     n_val = len(val_cat_idx)
     train_dataset = DRWDataset(DC2Sampler(train_seed, bandpasses, train_cat_idx),
-                               out_dir='/home/jwp/stage/sl/latent_ode/train_drw',
+                               out_dir='/home/jwp/stage/sl/magnify/magnify/latent_ode/train_drw',
                                num_samples=n_train,
                                seed=train_seed,
                                n_pointings_init=n_pointings,
@@ -171,7 +171,7 @@ def get_drw_datasets(train_seed, val_seed):
 
     # Validation data
     val_dataset = DRWDataset(DC2Sampler(val_seed, bandpasses, val_cat_idx),
-                             out_dir='/home/jwp/stage/sl/latent_ode/val_drw',
+                             out_dir='/home/jwp/stage/sl/magnify/magnify/latent_ode/val_drw',
                              num_samples=n_val,
                              seed=val_seed,
                              n_pointings_init=n_pointings,
