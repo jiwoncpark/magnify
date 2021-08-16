@@ -275,7 +275,7 @@ class VAE_Baseline(nn.Module):
 
         #print("get_reconstruction done -- computing likelihood")
         fp_mu, fp_std, fp_enc = info["first_point"]
-        fp_std = fp_std.abs()
+        fp_std = torch.exp(fp_std)
         fp_distr = Normal(fp_mu, fp_std)
 
         assert(torch.sum(fp_std < 0) == 0.)
