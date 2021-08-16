@@ -410,7 +410,9 @@ def normalize_masked_data(data, mask, att_min, att_max):
     att_max[att_max == 0.] = 1.
 
     if (att_max != 0.).all():
-        data_norm = (data - att_min) / (att_max - att_min) - 1.0
+        data_norm = (data - att_min) / att_max
+        # data_norm = (data - att_min) / (att_max - att_min) - 1.0
+        # data_norm = data
     else:
         raise Exception("Zero!")
 
