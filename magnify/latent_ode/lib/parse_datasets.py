@@ -61,6 +61,7 @@ def parse_datasets(args, device):
         train_dataloader = DataLoader(train_dataset,
                                       batch_size=batch_size,
                                       shuffle=False,
+                                      # num_workers=4,
                                       collate_fn=partial(drw_utils.variable_time_collate_fn,
                                                          args=args,
                                                          device=device,

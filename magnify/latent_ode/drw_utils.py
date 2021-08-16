@@ -152,8 +152,8 @@ def get_drw_datasets(train_seed, val_seed):
     log_params += [False for bp in bandpasses]
     n_pointings = 1000
 
-    train_cat_idx = np.load('/home/jwp/stage/sl/magnify/train_idx.npy')[:100]  # 11227
-    val_cat_idx = np.load('/home/jwp/stage/sl/magnify/val_idx.npy')[:20]  # 114
+    train_cat_idx = np.load('/home/jwp/stage/sl/magnify/train_idx.npy')  # 11227
+    val_cat_idx = np.load('/home/jwp/stage/sl/magnify/val_idx.npy')  # 114
     n_train = len(train_cat_idx)
     n_val = len(val_cat_idx)
     train_dataset = DRWDataset(DC2Sampler(train_seed, bandpasses, train_cat_idx),

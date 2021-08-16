@@ -24,7 +24,6 @@ from magnify.latent_ode.lib.parse_datasets import parse_datasets
 from magnify.latent_ode.lib.ode_func import ODEFunc, ODEFunc_w_Poisson
 from magnify.latent_ode.lib.diffeq_solver import DiffeqSolver
 import magnify.latent_ode.lib.utils as utils
-
 # Generative model for noisy data based on ODE
 parser = argparse.ArgumentParser('Latent ODE')
 parser.add_argument('-n',  type=int, default=100, help="Size of the dataset")

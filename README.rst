@@ -29,4 +29,5 @@ python magnify/train_latent_ode.py --niters 600 -n 1000 -s 50 -l 10 --dataset pe
 
 * Mock AGN light curves, simulated using the damped random walk model
 ```bash
-python magnify/train_latent_ode.py --batch-size 10 --niters 600 -n 1000 -l 10 --dataset drw --latent-ode --regress
+python magnify/train_latent_ode.py --batch-size 50 --niters 50 -n 20 -l 20 --dataset drw --latent-ode --regress
+```
