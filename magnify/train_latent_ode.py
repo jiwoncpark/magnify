@@ -73,7 +73,7 @@ parser.add_argument('--regress', action='store_true', help="Include regression l
 parser.add_argument('--linear-classif', action='store_true', help="If using a classifier, use a linear classifier instead of 1-layer NN")
 parser.add_argument('--extrap', action='store_true', help="Set extrapolation mode. If this flag is not set, run interpolation mode.")
 
-parser.add_argument('-t', '--timepoints', type=int, default=100, help="Total number of time-points")
+parser.add_argument('-t', '--timepoints', type=int, default=150, help="Total number of time-points")
 parser.add_argument('--max-t',  type=float, default=5., help="We subsample points in the interval [0, args.max_tp]")
 parser.add_argument('--noise-weight', type=float, default=0.01, help="Noise amplitude for generated traejctories")
 
@@ -97,7 +97,6 @@ if __name__ == '__main__':
     ckpt_path = os.path.join(args.save, "experiment_" + str(experimentID) + '.ckpt')
 
     start = time.time()
-    print("Sampling dataset of {} training examples".format(args.n))
 
     input_command = sys.argv
     ind = [i for i in range(len(input_command)) if input_command[i] == "--load"]
@@ -231,25 +230,23 @@ if __name__ == '__main__':
     if args.viz:
         viz = Visualizations(device)
 
-    ##################################################################
-
-    #Load checkpoint and evaluate the model
-    if args.load is not None:
-        utils.get_ckpt_model(ckpt_path, model, device)
-        exit()
-
-    ##################################################################
-    # Training
-
+    # Training logs
     log_path = "logs/" + file_name + "_" + str(experimentID) + ".log"
     if not os.path.exists("logs/"):
         utils.makedirs("logs/")
-    logger = utils.get_logger(logpath=log_path, filepath=os.path.abspath(__file__))
+    logger = utils.get_logger(logpath=log_path,
+                              filepath=os.path.abspath(__file__))
     logger.info(input_command)
-
     optimizer = optim.Adamax(model.parameters(), lr=args.lr)
-
     num_batches = data_obj["n_train_batches"]
+
+    # Load checkpoint and evaluate the model
+    if args.load is not None:
+        utils.get_ckpt_model(ckpt_path, model, device, optimizer)
+        print(f"Loaded model at experiment {args.load}")
+        # Decrease learning rate by a factor of 10
+        for g in optimizer.param_groups:
+            g['lr'] = 0.1*g['lr']
 
     for itr in range(1, num_batches * (args.niters + 1)):
         optimizer.zero_grad()
@@ -257,7 +254,7 @@ if __name__ == '__main__':
                                    decay_rate=0.999,
                                    lowest=args.lr / 10)
 
-        wait_until_kl_inc = 10
+        wait_until_kl_inc = 30
         if itr // num_batches < wait_until_kl_inc:
             kl_coef = 0.
         else:
@@ -316,6 +313,7 @@ if __name__ == '__main__':
             torch.save({
                 'args': args,
                 'state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
             }, ckpt_path)
 
 
@@ -334,5 +332,6 @@ if __name__ == '__main__':
     torch.save({
         'args': args,
         'state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
     }, ckpt_path)
 
