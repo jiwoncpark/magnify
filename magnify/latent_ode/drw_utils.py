@@ -9,7 +9,7 @@ from magnificat.samplers.dc2_sampler import DC2Sampler
 import magnify.latent_ode.lib.utils as utils
 
 
-def get_data_min_max(records, device):
+def get_data_min_max(records, device, predefined=True):
     """Get minimum and maximum for each feature (bandpass)
     across the whole dataset
 
@@ -23,7 +23,6 @@ def get_data_min_max(records, device):
     tuple
         min and max values in y across the dataset
     """
-
     data_min, data_max = None, None
     inf = torch.Tensor([float("Inf")])[0].to(device)
 
@@ -35,6 +34,8 @@ def get_data_min_max(records, device):
         vals = data['y']
 
         n_features = vals.size(-1)
+        if predefined:
+            break
 
         batch_min = []
         batch_max = []
@@ -56,8 +57,12 @@ def get_data_min_max(records, device):
         else:
             data_min = torch.min(data_min, batch_min)
             data_max = torch.max(data_max, batch_max)
-
-    return data_min.to(device), data_max.to(device)
+    if predefined:
+        data_min = 15*torch.ones(n_features).to(device)
+        data_max = 30*torch.ones(n_features).to(device)
+        return data_min, data_max
+    else:
+        return data_min.to(device), data_max.to(device)
 
 
 def variable_time_collate_fn(batch, args, device=torch.device("cpu"),
@@ -141,7 +146,7 @@ def variable_time_collate_fn(batch, args, device=torch.device("cpu"),
 
 
 def get_drw_datasets(train_seed, val_seed):
-    bandpasses = list('ugrizy')
+    bandpasses = list('gri')
     train_params = [f'tau_{bp}' for bp in bandpasses]
     train_params += [f'SF_inf_{bp}' for bp in bandpasses]
     train_params += ['BH_mass', 'M_i', 'redshift']

@@ -46,9 +46,8 @@ def parse_datasets(args, device):
                                                                  val_seed)
         # record_id, tt, y_vals, labels, mask = train_dataset[0]
         input_dim = train_dataset[0]['y'].shape[-1]  # [n_filters]
-        n_labels = len(train_dataset.param_names)
-
-        batch_size = min(min(len(train_dataset), args.batch_size), args.n)
+        n_labels = len(train_dataset.get_sliced_params())
+        batch_size = args.batch_size
         print("batch size", batch_size)
         # record_id, tt, vals, mask, labels = train_data[0]
 
@@ -78,7 +77,7 @@ def parse_datasets(args, device):
                                                         data_min=data_min,
                                                         data_max=data_max))
 
-        attr_names = train_dataset.param_names
+        attr_names = train_dataset.get_sliced_params()
         data_objects = {"dataset_obj": train_dataset,
                         "train_dataloader": utils.inf_generator(train_dataloader),
                         "test_dataloader": utils.inf_generator(test_dataloader),

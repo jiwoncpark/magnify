@@ -284,8 +284,7 @@ def get_next_batch(dataloader):
     return batch_dict
 
 
-
-def get_ckpt_model(ckpt_path, model, device):
+def get_ckpt_model(ckpt_path, model, device, optimizer=None):
     if not os.path.exists(ckpt_path):
         raise Exception("Checkpoint " + ckpt_path + " does not exist.")
     # Load checkpoint.
@@ -293,7 +292,6 @@ def get_ckpt_model(ckpt_path, model, device):
     ckpt_args = checkpt['args']
     state_dict = checkpt['state_dict']
     model_dict = model.state_dict()
-
     # 1. filter out unnecessary keys
     state_dict = {k: v for k, v in state_dict.items() if k in model_dict}
     # 2. overwrite entries in the existing state dict
@@ -301,9 +299,12 @@ def get_ckpt_model(ckpt_path, model, device):
     # 3. load the new state dict
     model.load_state_dict(state_dict)
     model.to(device)
+    # 4. Load the optimizer state dict
+    if optimizer is not None:
+        optimizer.load_state_dict(checkpt['optimizer_state_dict'])
 
 
-def update_learning_rate(optimizer, decay_rate = 0.999, lowest = 1e-3):
+def update_learning_rate(optimizer, decay_rate=0.999, lowest=1e-5):
     for param_group in optimizer.param_groups:
         lr = param_group['lr']
         lr = max(lr * decay_rate, lowest)
