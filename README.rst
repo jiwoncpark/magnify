@@ -31,3 +31,12 @@ python magnify/train_latent_ode.py --niters 600 -n 1000 -s 50 -l 10 --dataset pe
 ```bash
 python magnify/train_latent_ode.py --batch-size 60 --niters 50 -n 10000 -l 20 --dataset drw --latent-ode --regress
 ```
+
+3. Latent SDE (Li et al 2020)
+
+* Single mock AGN light curve, simulated using the damped random walk model
+```bash
+pip install torchsde
+python magnify/train_latent_sde_drw.py --train-dir <TRAIN_DIR>
+```
+
