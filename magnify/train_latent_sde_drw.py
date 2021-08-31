@@ -99,7 +99,7 @@ class LatentSDE(torchsde.SDEIto):
 
         # Approximate posterior drift: Takes in 2 positional encodings and the state.
         self.net = nn.Sequential(
-            nn.Linear(3, 200),
+            nn.Linear(3, 200),  # 3 because sin(t), cos(t), y
             nn.Tanh(),
             nn.Linear(200, 200),
             nn.Tanh(),
@@ -217,7 +217,7 @@ def make_drw_data():
     ts_vis_rest_ = ts_vis_/(1+z)
     ys_vis_ = get_drw(ts_vis_rest_, tau=200, z=z, SF_inf=0.3,
                       xmean=0, rng=rng)
-    # Normalization of time is important!
+    # Normalization is important!
     ts_vis_ = ts_vis_/3650.0*4.0  # normalize to 4
     random_idx = rng.choice(np.arange(1, len(ts_vis_)-1),
                             size=200, replace=False)
@@ -292,6 +292,9 @@ def main():
     if args.show_prior:
         with torch.no_grad():
             zs = model.sample_p(ts=ts_vis, batch_size=vis_batch_size, eps=eps, bm=bm).squeeze()
+            # zs ~ [T_full, B]
+            # ts_vis ~ [T_full]
+            # vis_idx ~ [B]
             ts_vis_, zs_ = ts_vis.cpu().numpy(), zs.cpu().numpy()
             zs_ = np.sort(zs_, axis=1)
 
@@ -322,12 +325,16 @@ def main():
                 zs = model.sample_q(ts=ts_vis, batch_size=vis_batch_size, eps=eps, bm=bm).squeeze()
                 samples = zs[:, vis_idx]
                 ts_vis_, zs_, samples_ = ts_vis.cpu().numpy(), zs.cpu().numpy(), samples.cpu().numpy()
+                # For each times step, order fluxes across examples in batch
                 zs_ = np.sort(zs_, axis=1)
                 plt.subplot(frameon=False)
 
                 if args.show_percentiles:
                     for alpha, percentile in zip(alphas, percentiles):
                         idx = int((1 - percentile) / 2. * vis_batch_size)
+                        # Remember zs_ is ordered, so can just take idx
+                        # percentile=0.5 is idx=0.25*vis_batch_size
+                        # (taking quarter of examples on each side)
                         zs_bot_, zs_top_ = zs_[:, idx], zs_[:, -idx]
                         plt.fill_between(ts_vis_, zs_bot_, zs_top_, alpha=alpha, color=fill_color)
 
@@ -336,7 +343,8 @@ def main():
 
                 if args.show_samples:
                     for j in range(num_samples):
-                        plt.plot(ts_vis_, samples_[:, j], color=sample_colors[j], linewidth=1.0)
+                        plt.plot(ts_vis_, samples_[:, j],
+                                 color=sample_colors[j], linewidth=1.0)
 
                 if args.show_arrows:
                     num, dt = 12, 0.12
