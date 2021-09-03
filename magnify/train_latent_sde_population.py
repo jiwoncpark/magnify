@@ -267,7 +267,7 @@ def save_state(model, optim, lr_scheduler, kl_scheduler, epoch,
              model=model.state_dict(),
              optimizer=optim.state_dict(),
              lr_scheduler=lr_scheduler.state_dict(),
-             kl_scheduler=kl_scheduler.state_dict(),
+             kl_scheduler=kl_scheduler.__dict__,
              epoch=epoch,
              )
     model_path = os.path.join(train_dir, 'model.mdl')
