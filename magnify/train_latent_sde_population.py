@@ -29,7 +29,8 @@ from tqdm import tqdm
 from torch import distributions, nn, optim
 from torch.distributions import Normal
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import Dataset, DataLoader
+import magnify.data.drw_utils as drw_utils
+from torch.utils.data import DataLoader
 import torchsde
 
 # w/ underscore -> numpy; w/o underscore -> torch.
@@ -274,72 +275,6 @@ def save_state(model, optim, lr_scheduler, kl_scheduler, epoch,
     torch.save(state, model_path)
 
 
-def make_drw_data(t0, t1, n_train, data_path):
-    from magnificat.drw_utils import get_drw
-    ts_full_ = np.arange(0, 3650+1, 1)
-    z = 1.0
-    ts_vis_rest_ = ts_full_/(1+z)
-    # Normalization of time is important!
-    ts_vis_ = ts_full_/3650.0*(t1 - t0) + t0  # shift and scale to [t0, t1]
-    random_idx = np.random.choice(np.arange(len(ts_vis_)),
-                                  size=200, replace=False)
-    random_idx = np.sort(random_idx)
-    ts_ = ts_vis_[random_idx]  # training times
-    ts_ext_ = ts_
-    ys_ = np.empty([len(ts_), n_train, 1])
-    # Numpy arrays
-    for b in tqdm(range(n_train), desc='Generating data'):
-        rng = np.random.default_rng(b)
-        ys_full_ = get_drw(ts_vis_rest_, tau=200, z=z, SF_inf=0.3,
-                           xmean=0, rng=rng)
-        ys_[:, b, 0] = ys_full_[random_idx]  # training fluxes
-
-    import matplotlib.pyplot as plt
-    plt.scatter(ts_vis_, ys_full_)  # last in batch
-    plt.scatter(ts_, ys_[:, -1, :])  # last in batch
-    plt.savefig('simulated_drw.png')
-
-    # Torch tensors
-    ts = torch.tensor(ts_).float()
-    ts_ext = torch.tensor(ts_ext_).float()
-    ts_vis = torch.tensor(ts_vis_).float()
-    ys = torch.tensor(ys_).float()
-    data = Data(ts_, ts_ext_, ts_vis_, ts, ts_ext, ts_vis, ys, ys_)
-    torch.save(data, data_path)
-    return data
-
-
-class DRWDataset(Dataset):
-    def __init__(self, device, data_kwargs={}):
-        data_path = data_kwargs['data_path']
-        if os.path.exists(data_path):
-            data = torch.load(data_path)
-        else:
-            data = make_drw_data(**data_kwargs)
-        ts_, ts_ext_, ts_vis_, ts, ts_ext, ts_vis, ys, ys_ = data
-        self.ts_ = ts_
-        self.ts = ts.to(device)
-        self.ts_vis_ = ts_vis_
-        self.ts_vis = ts_vis.to(device)
-        self.ys = ys.to(device)
-
-    def __getitem__(self, idx):
-        return self.ys[:, [idx], :]
-
-    def __len__(self):
-        return self.ys.shape[1]
-
-    def get_ref_ys(self):
-        return self.ys[:, [-1], :]
-
-    def get_ref_ys_np(self):
-        return self.ys[:, -1, 0].cpu().numpy()  # [T,]
-
-
-def collate(l):
-    return torch.cat(l, dim=1)
-
-
 def main(
         n_train=128*100,
         batch_size=128,
@@ -356,25 +291,38 @@ def main(
         pause_every=1,
         noise_std=0.01,
         adjoint=True,
-        train_dir='./dump/drw_single/',
+        train_dir='./dump/single_band_no_mask/',
         method="euler",
         show_prior=True,
         dpi=50,
+        trim_single_band=False,
 ):
     os.makedirs(train_dir, exist_ok=True)
     logger = SummaryWriter(train_dir)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # Generate a single Lorentz Attractor trajectory with fixed
-    # hyperparams
-    data_path = os.path.join(train_dir, 'drw_data.pth')
 
-    train_dataset = DRWDataset(device, data_kwargs={'data_path': data_path,
-                                                    't0': t0, 't1': t1,
-                                                    'n_train': n_train})
+    def t_transform(x):
+        return x/3650.0*t1 + t0
+
+    def y_transform(y):
+        return y - 25.0
+
+    train_dataset, val_dataset = drw_utils.get_drw_datasets(train_seed=123,
+                                                            val_seed=456,
+                                                            n_pointings=1,
+                                                            bandpasses=['r'],
+                                                            t_transform=t_transform,
+                                                            y_transform=y_transform)
+
     train_loader = DataLoader(train_dataset, shuffle=True,
-                              batch_size=batch_size,
-                              collate_fn=collate)
+                              batch_size=batch_size)
+    val_loader = DataLoader(val_dataset, shuffle=False,
+                            batch_size=len(val_dataset))
+    # Expected:
     # xs ~ [T, B, Y_out_dim]
+    # ts ~ [T]
+    # Current:
+    # xs ~ [B, T, Y_out_dim]
     # ts ~ [T]
     latent_sde = LatentSDE(
         data_size=output_dim,  # output (Y) data dim
@@ -391,7 +339,8 @@ def main(
     kl_scheduler = LinearScheduler(iters=kl_anneal_iters)
 
     # Fix the same Brownian motion for visualization.
-    vis_batch_size = 256
+    vis_batch_size = len(val_dataset)
+    ts_vis = t_transform(torch.arange(0, 3650+1, 1))  # tensor
     bm_vis = torchsde.BrownianInterval(
         t0=t0, t1=t1, size=(vis_batch_size, latent_size,), device=device,
         levy_area_approximation="space-time")
@@ -403,13 +352,24 @@ def main(
     fill_color = '#9ebcda'
     mean_color = '#4d004b'
     num_samples = len(sample_colors)
-    ylims = (-1.1, 1.1)
+    ylims = (-3.1, 3.1)
     if show_prior:
         with torch.no_grad():
-            zs = latent_sde.sample(ts=train_dataset.ts_vis,
+            for batch in val_loader:
+                # Last example in batch
+                ys_val = batch['y'][[-1], :, :]  # [1, T, Y_out_dim]
+                ys_val = ys_val.transpose(0, 1)  # [T, 1, Y_out_dim]
+                ts = batch['x'][-1, :]  # [T]
+                if trim_single_band:
+                    trimmed_mask = batch['trimmed_mask'][-1, :, 0]  # [T,]
+                    ys_val = ys_val[trimmed_mask, :, :]
+                    ts = ts[trimmed_mask]
+                break
+            print(ys_val.shape, ts.shape)
+            zs = latent_sde.sample(ts=ts_vis,
                                    batch_size=vis_batch_size,
                                    bm=bm_vis).squeeze()
-            ts_vis_, zs_ = train_dataset.ts_vis.cpu().numpy(), zs.cpu().numpy()
+            ts_vis_, zs_ = ts_vis.cpu().numpy(), zs.cpu().numpy()
             zs_ = np.sort(zs_, axis=1)
 
             img_dir = os.path.join(train_dir, 'prior.png')
@@ -423,8 +383,8 @@ def main(
 
             # `zorder` determines who's on top; the larger the more at the top.
             # Plot data
-            plt.scatter(train_dataset.ts_,
-                        train_dataset.get_ref_ys_np(),
+            plt.scatter(ts.cpu().numpy().squeeze(),
+                        ys_val.cpu().numpy().squeeze(),
                         marker='x', zorder=3, color='k', s=35)  # last in batch
             plt.ylim(ylims)
             plt.xlabel('$t$')
@@ -434,12 +394,19 @@ def main(
             plt.close()
             logging.info(f'Saved prior figure at: {img_dir}')
 
+    last_val_loss = float('inf')  # init
     n_batches = len(train_loader)
     for global_step in tqdm(range(num_iters)):
-        for i, ys_batch in enumerate(train_loader):
+        for i, batch in enumerate(train_loader):
+            ys_batch = batch['y'].transpose(0, 1)  # [T, B, Y_out_dim]
+            ts = batch['x'][-1, :]  # [T]
+            if trim_single_band:
+                trimmed_mask = batch['trimmed_mask'][-1, :, 0]  # [T,]
+                ys_batch = ys_batch[trimmed_mask, :, :]
+                ts = ts[trimmed_mask]
             latent_sde.zero_grad()
-            log_pxs, log_ratio = latent_sde(ys_batch,
-                                            train_dataset.ts,
+            log_pxs, log_ratio = latent_sde(ys_batch.to(device),
+                                            ts.to(device),
                                             noise_std, adjoint, method)
             loss = -log_pxs + log_ratio * kl_scheduler.val
             logger.add_scalar('loss',
@@ -458,8 +425,6 @@ def main(
             optimizer.step()
             scheduler.step(loss)
             kl_scheduler.step()
-        save_state(latent_sde, optimizer, scheduler, kl_scheduler, global_step,
-                   train_dir)
 
         if global_step % pause_every == 0:
             lr_now = optimizer.param_groups[0]['lr']
@@ -470,10 +435,39 @@ def main(
             )
             # Visualization during training
             with torch.no_grad():
+                for i, val_batch in enumerate(val_loader):
+                    # Note there's only one batch
+                    ys_batch = val_batch['y'].transpose(0, 1)  # [T, B, Y_out_dim]
+                    ts = val_batch['x'][-1, :]  # [T]
+                    if trim_single_band:
+                        trimmed_mask = val_batch['trimmed_mask'][-1, :, 0]  # [T,]
+                        ys_batch = ys_batch[trimmed_mask, :, :]
+                        ts = ts[trimmed_mask]
+                    log_pxs, log_ratio = latent_sde(ys_batch.to(device),
+                                                    ts.to(device),
+                                                    noise_std, adjoint, method)
+                    val_loss = -log_pxs + log_ratio * kl_scheduler.val
+                    logger.add_scalar('val_loss',
+                                      val_loss.detach().cpu().item(),
+                                      global_step)
+                    logger.add_scalar('val_neg_log_pxs',
+                                      (-log_pxs).detach().cpu().item(),
+                                      global_step)
+                    logger.add_scalar('val_kl_term',
+                                      (log_ratio*kl_scheduler.val).detach().cpu().item(),
+                                      global_step)
+                # Last example in batch
+                trimmed_mask = val_batch['trimmed_mask'][-1, :, 0]  # [T,]
+                ys_val = val_batch['y'][[-1], :, :]  # [1, T, Y_out_dim]
+                ys_val = ys_val.transpose(0, 1)  # [T, 1, Y_out_dim]
+                ts = val_batch['x'][-1, :]  # [T]
+                if trim_single_band:
+                    ys_val = ys_val[trimmed_mask, :, :]
+                    ts = ts[trimmed_mask]  # [T]
                 sample = latent_sde.sample_posterior(vis_batch_size,
-                                                     train_dataset.get_ref_ys(),
-                                                     train_dataset.ts,
-                                                     train_dataset.ts_vis,
+                                                     ys_val.to(device),
+                                                     ts.to(device),
+                                                     ts_vis.to(device),
                                                      bm=None,
                                                      method='euler').squeeze()
                 # zs ~ [T_vis=3651, B]
@@ -481,19 +475,24 @@ def main(
                 # ts_vis_ ~ [T_vis]
                 # sample_ ~ [T_vis]
                 fig, ax = plt.subplots()
-
                 # Plot sample for last light curve in batch
-                ax.plot(train_dataset.ts_vis_, sample_,  # last in batch
+                ax.plot(ts_vis.cpu().numpy(), sample_,  # last in batch
                         color=mean_color)
                 # Plot data for last light curve in batch
-                ax.scatter(train_dataset.ts_,
-                           train_dataset.get_ref_ys_np(),  # last in batch
+                ax.scatter(ts.cpu().numpy(),
+                           ys_val.cpu().numpy().squeeze(),  # last in batch
                            marker='x', zorder=3, color='k', s=35)
                 ax.set_ylim(ylims)
                 ax.set_xlabel('$t$')
                 ax.set_ylabel('$Y_t$')
                 fig.tight_layout()
                 logger.add_figure('recovery', fig, global_step=global_step)
+
+        if val_loss < last_val_loss:
+            save_state(latent_sde, optimizer, scheduler, kl_scheduler,
+                       global_step,
+                       train_dir)
+            last_val_loss = val_loss
 
 
 if __name__ == '__main__':
