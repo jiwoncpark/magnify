@@ -146,7 +146,8 @@ def variable_time_collate_fn(batch, args, device=torch.device("cpu"),
 
 
 def get_drw_datasets(train_seed, val_seed, n_pointings, bandpasses,
-                     t_transform, y_transform):
+                     t_transform, y_transform,
+                     train_dir, val_dir):
     train_params = [f'tau_{bp}' for bp in bandpasses]
     train_params += [f'SF_inf_{bp}' for bp in bandpasses]
     train_params += ['BH_mass', 'M_i', 'redshift']
@@ -162,7 +163,7 @@ def get_drw_datasets(train_seed, val_seed, n_pointings, bandpasses,
     n_train = len(train_cat_idx)
     n_val = len(val_cat_idx)
     train_dataset = DRWDataset(DC2Sampler(train_seed, bandpasses, train_cat_idx),
-                               out_dir='/home/jwp/stage/sl/magnify/latent_ode_data/train_drw_single',
+                               out_dir=train_dir,
                                num_samples=n_train,
                                seed=train_seed,
                                is_training=True,
@@ -170,7 +171,7 @@ def get_drw_datasets(train_seed, val_seed, n_pointings, bandpasses,
                                transform_y_func=y_transform,
                                err_y=0.01,
                                obs_kwargs={'n_pointings_init': n_pointings,
-                                           'obs_dir': '/home/jwp/stage/sl/magnify/latent_ode_data/single_obs',
+                                           'obs_dir': '/home/jwp/stage/sl/magnify/latent_ode_data/gr_obs',
                                            'bandpasses': bandpasses},
                                prestored_bandpasses=bandpasses)
     train_dataset.slice_params = [train_dataset.param_names.index(n) for n in train_params]
@@ -179,7 +180,7 @@ def get_drw_datasets(train_seed, val_seed, n_pointings, bandpasses,
 
     # Validation data
     val_dataset = DRWDataset(DC2Sampler(val_seed, bandpasses, val_cat_idx),
-                             out_dir='/home/jwp/stage/sl/magnify/latent_ode_data/val_drw_single',
+                             out_dir=val_dir,
                              num_samples=n_val,
                              seed=val_seed,
                              is_training=False,
@@ -187,7 +188,7 @@ def get_drw_datasets(train_seed, val_seed, n_pointings, bandpasses,
                              transform_y_func=y_transform,
                              err_y=0.01,
                              obs_kwargs={'n_pointings_init': n_pointings,
-                                         'obs_dir': '/home/jwp/stage/sl/magnify/latent_ode_data/single_obs',
+                                         'obs_dir': '/home/jwp/stage/sl/magnify/latent_ode_data/gr_obs',
                                          'bandpasses': bandpasses},
                              prestored_bandpasses=bandpasses)
     val_dataset.slice_params = train_dataset.slice_params
