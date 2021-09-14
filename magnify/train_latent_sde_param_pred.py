@@ -14,23 +14,21 @@
 
 """Latent SDE fit to a single time series with uncertainty quantification."""
 import fire
-import argparse
 import logging
-import math
 import os
 import random
 from collections import namedtuple
-from typing import Optional, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from torch import nn, optim
 from tqdm import tqdm
-from torch import distributions, nn, optim
-from torch.distributions import Normal
 from torch.utils.tensorboard import SummaryWriter
 import magnify.data.drw_utils as drw_utils
 from torch.utils.data import DataLoader
+import magnify.script_utils as script_utils
+from magnify.latent_sde.models import LatentSDE
 import torchsde
 
 # w/ underscore -> numpy; w/o underscore -> torch.
@@ -51,268 +49,10 @@ class LinearScheduler(object):
         return self._val
 
 
-class EMAMetric(object):
-    def __init__(self, gamma: Optional[float] = .99):
-        super(EMAMetric, self).__init__()
-        self._val = 0.
-        self._gamma = gamma
-
-    def step(self, x: Union[torch.Tensor, np.ndarray]):
-        x = x.detach().cpu().numpy() if torch.is_tensor(x) else x
-        self._val = self._gamma * self._val + (1 - self._gamma) * x
-        return self._val
-
-    @property
-    def val(self):
-        return self._val
-
-
-def str2bool(v):
-    """Used for boolean arguments in argparse; avoiding `store_true` and `store_false`."""
-    if isinstance(v, bool): return v
-    if v.lower() in ('yes', 'true', 't', 'y', '1'): return True
-    elif v.lower() in ('no', 'false', 'f', 'n', '0'): return False
-    else: raise argparse.ArgumentTypeError('Boolean value expected.')
-
-
 def manual_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-
-
-def _stable_division(a, b, epsilon=1e-7):
-    b = torch.where(b.abs().detach() > epsilon, b, torch.full_like(b, fill_value=epsilon) * b.sign())
-    return a / b
-
-
-class Encoder(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
-        super(Encoder, self).__init__()
-        self.gru = nn.GRU(input_size=input_size, hidden_size=hidden_size)
-        self.lin = nn.Linear(hidden_size, output_size)
-
-    def forward(self, inp):
-        out, _ = self.gru(inp)
-        out = self.lin(out)
-        return out
-
-
-class ResMLP(nn.Module):
-    """Residual MLP that predicts the target quantities
-
-    Attributes
-    ----------
-    dim_in : int
-        Dimension of stochastic latent vector
-    dim_out : int
-        Number of target quantities to predict, or number of parameters
-        defining the posterior PDF over the target quantities
-    """
-    def __init__(self, dim_in, dim_out, dim_hidden=16):
-        super(ResMLP, self).__init__()
-        self.dim_in = dim_in
-        self.dim_out = dim_out
-        self.dim_hidden = dim_hidden
-        self.pre_skip = nn.Sequential(nn.Linear(self.dim_in, self.dim_hidden),
-                                      nn.ReLU(),
-                                      nn.Linear(self.dim_hidden, self.dim_hidden),
-                                      nn.ReLU(),
-                                      nn.Linear(self.dim_hidden, self.dim_in),
-                                      nn.LayerNorm(self.dim_in))
-        self.post_skip = nn.Sequential(nn.Linear(self.dim_in, self.dim_hidden),
-                                       nn.ReLU(),
-                                       nn.Linear(self.dim_hidden, self.dim_out))
-
-    def forward(self, z0):
-        # z0 ~ [B, dim_in]
-        out = self.pre_skip(z0)  # [B, dim_in]
-        out = out + z0  # [B, dim_in], skip connection
-        out = self.post_skip(out)  # projector
-        return out
-
-
-class LatentSDE(nn.Module):
-    sde_type = "ito"
-    noise_type = "diagonal"
-
-    def __init__(self, data_size, latent_size, context_size, hidden_size,
-                 n_params):
-        super(LatentSDE, self).__init__()
-        # Encoder.
-        self.encoder = Encoder(input_size=data_size, hidden_size=hidden_size,
-                               output_size=context_size)
-        self.qz0_net = nn.Linear(context_size, latent_size + latent_size)
-
-        # Decoder.
-        self.f_net = nn.Sequential(
-            nn.Linear(latent_size + context_size, hidden_size),
-            nn.Softplus(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.Softplus(),
-            nn.Linear(hidden_size, latent_size),
-        )
-        self.h_net = nn.Sequential(
-            nn.Linear(latent_size, hidden_size),
-            nn.Softplus(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.Softplus(),
-            nn.Linear(hidden_size, latent_size),
-        )
-        # This needs to be an element-wise function for the SDE to satisfy diagonal noise.
-        self.g_nets = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(1, hidden_size),
-                    nn.Softplus(),
-                    nn.Linear(hidden_size, 1),
-                    nn.Sigmoid()
-                )
-                for _ in range(latent_size)
-            ]
-        )
-        self.projector = nn.Linear(latent_size, data_size)
-
-        self.param_mlp = ResMLP(latent_size, n_params, hidden_size)
-
-        self.pz0_mean = nn.Parameter(torch.zeros(1, latent_size))
-        self.pz0_logstd = nn.Parameter(torch.zeros(1, latent_size))
-
-        self._ctx = None
-
-    def contextualize(self, ctx):
-        """Set the context vector, which is an encoding of the observed
-        sequence
-
-        Parameters
-        ----------
-        ctx : tuple
-            A tuple of tensors of sizes (T,), (T, batch_size, d)
-        """
-        self._ctx = ctx
-
-    def f(self, t, y):
-        """Network that decodes the latent and context
-        (posterior drift function)
-        Time-inhomogeneous (see paper sec 9.12)
-
-        """
-        ts, ctx = self._ctx
-        # ts ~ [T]
-        # ctx ~ [T, B, context_size]
-        ts = ts.to(t.device)
-        # searchsorted output: if t were inserted into ts, what would the
-        # indices have to be to preserve ordering, assuming ts is sorted
-        # training time: t is tensor with no size (scalar)
-        # inference time: t ~ [num**2, 1] from the meshgrid
-        i = min(torch.searchsorted(ts, t.min(), right=True), len(ts) - 1)
-        # training time: y ~ [B, latent_dim]
-        # inference time: y ~ [num**2, 1] from the meshgrid
-        return self.f_net(torch.cat((y, ctx[i]), dim=1))
-
-    def h(self, t, y):
-        """Network that decodes the latent
-        (prior drift function)
-
-        """
-        return self.h_net(y)
-
-    def g(self, t, y):
-        """Network that decodes each time step of the latent
-        (diagonal diffusion)
-
-        """
-        y = torch.split(y, split_size_or_sections=1, dim=1)
-        out = [g_net_i(y_i) for (g_net_i, y_i) in zip(self.g_nets, y)]
-        return torch.cat(out, dim=1)
-
-    def forward(self, xs, ts, noise_std, adjoint=False, method="euler"):
-        # Contextualization is only needed for posterior inference.
-        ctx = self.encoder(torch.flip(xs, dims=(0,)))  # [T, B, context_size] = [100, 1024, 64]
-        ctx = torch.flip(ctx, dims=(0,))  # revert to original time sequence
-        self.contextualize((ts, ctx))
-
-        qz0_mean, qz0_logstd = self.qz0_net(ctx[0]).chunk(chunks=2, dim=1)
-        z0 = qz0_mean + qz0_logstd.exp() * torch.randn_like(qz0_mean)
-        # z0 ~ [B, latent_dim] = [1024, 4]
-
-        if adjoint:
-            # Must use the argument `adjoint_params`, since `ctx` is not part of the input to `f`, `g`, and `h`.
-            adjoint_params = (
-                    (ctx,) +
-                    tuple(self.f_net.parameters()) + tuple(self.g_nets.parameters()) + tuple(self.h_net.parameters())
-            )
-            zs, log_ratio = torchsde.sdeint_adjoint(
-                self, z0, ts, adjoint_params=adjoint_params, dt=1e-2, logqp=True, method=method)
-            # zs ~ [T, B, latent_dim] = [100, 1024, 4]
-            # log_ratio ~ [T-1, B] = [99, 1024]
-        else:
-            zs, log_ratio = torchsde.sdeint(self, z0, ts, dt=1e-2, logqp=True, method=method)
-
-        _xs = self.projector(zs)
-        # _xs ~ [T, B, Y_out_dim] = [100, 1024, 3]
-        xs_dist = Normal(loc=_xs, scale=noise_std)
-        # Sum across times and dimensions, mean across examples in batch
-        log_pxs = xs_dist.log_prob(xs).sum(dim=(0, 2)).mean(dim=0)  # scalar
-
-        qz0 = torch.distributions.Normal(loc=qz0_mean, scale=qz0_logstd.exp())
-        pz0 = torch.distributions.Normal(loc=self.pz0_mean, scale=self.pz0_logstd.exp())
-        # Sum over times, mean over batches
-        logqp0 = torch.distributions.kl_divergence(qz0, pz0).sum(dim=0).mean(dim=0)
-        logqp_path = log_ratio.sum(dim=0).mean(dim=0)
-
-        # Parameter predictions
-        param_pred = self.param_mlp(z0)
-        return log_pxs, logqp0 + logqp_path, param_pred
-
-    @torch.no_grad()
-    def sample_posterior(self, batch_size, xs, ts, ts_eval,
-                         bm=None, method='euler'):
-        # Contextualization is only needed for posterior inference.
-        ctx = self.encoder(torch.flip(xs, dims=(0,)))  # [T, B, context_size] = [100, 1024, 64]
-        ctx = torch.flip(ctx, dims=(0,))  # revert to original time sequence
-        self.contextualize((ts, ctx))
-
-        qz0_mean, qz0_logstd = self.qz0_net(ctx[0]).chunk(chunks=2, dim=1)
-        z0 = qz0_mean + qz0_logstd.exp() * torch.randn_like(qz0_mean)
-        # z0 ~ [B, latent_dim] = [1024, 4]
-        zs, log_ratio = torchsde.sdeint(self, z0, ts_eval, dt=1e-2,
-                                        logqp=True, method=method, bm=bm)
-        _xs = self.projector(zs)
-        # _xs ~ [T, B, Y_out_dim] = [100, 1024, 3]
-        return _xs
-
-    @torch.no_grad()
-    def sample(self, batch_size, ts, bm=None):
-        eps = torch.randn(size=(batch_size, *self.pz0_mean.shape[1:]),
-                          device=self.pz0_mean.device)
-        z0 = self.pz0_mean + self.pz0_logstd.exp() * eps
-        zs = torchsde.sdeint(self, z0, ts, names={'drift': 'h'}, dt=1e-3, bm=bm)
-        # Most of the times in ML, we don't sample the observation noise
-        # for visualization purposes.
-        _xs = self.projector(zs)
-        return _xs
-
-
-def save_state(model, optim, lr_scheduler, kl_scheduler, epoch,
-               train_dir):
-    """Save the state dict of the current training to disk
-    Parameters
-    ----------
-    train_loss : float
-        current training loss
-    val_loss : float
-        current validation loss
-    """
-    state = dict(
-             model=model.state_dict(),
-             optimizer=optim.state_dict(),
-             lr_scheduler=lr_scheduler.state_dict(),
-             kl_scheduler=kl_scheduler.__dict__,
-             epoch=epoch,
-             )
-    model_path = os.path.join(train_dir, 'model.mdl')
-    torch.save(state, model_path)
 
 
 def main(
@@ -396,11 +136,11 @@ def main(
 
     alphas = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55]
     percentiles = [0.999, 0.99, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]
-    vis_idx = np.random.permutation(vis_batch_size)
-    sample_colors = ('#8c96c6', '#8c6bb1', '#810f7c')
+    # vis_idx = np.random.permutation(vis_batch_size)
+    # sample_colors = ('#8c96c6', '#8c6bb1', '#810f7c')
     fill_color = '#9ebcda'
     mean_color = '#4d004b'
-    num_samples = len(sample_colors)
+    # num_samples = len(sample_colors)
     ylims = (-3.1, 3.1)
     if show_prior:
         with torch.no_grad():
@@ -558,9 +298,8 @@ def main(
                 logger.add_figure('recovery', fig, global_step=global_step)
 
         if val_loss < last_val_loss:
-            save_state(latent_sde, optimizer, scheduler, kl_scheduler,
-                       global_step,
-                       train_dir)
+            script_utils.save_state(latent_sde, optimizer, scheduler,
+                                    kl_scheduler, global_step, train_dir)
             last_val_loss = val_loss
 
 
