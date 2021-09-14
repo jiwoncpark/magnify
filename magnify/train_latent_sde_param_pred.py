@@ -110,6 +110,7 @@ class ResMLP(nn.Module):
         defining the posterior PDF over the target quantities
     """
     def __init__(self, dim_in, dim_out, dim_hidden=16):
+        super(ResMLP, self).__init__()
         self.dim_in = dim_in
         self.dim_out = dim_out
         self.dim_hidden = dim_hidden
@@ -127,7 +128,7 @@ class ResMLP(nn.Module):
         # z0 ~ [B, dim_in]
         out = self.pre_skip(z0)  # [B, dim_in]
         out = out + z0  # [B, dim_in], skip connection
-        out = self.post_skip(out)
+        out = self.post_skip(out)  # projector
         return out
 
 
@@ -329,7 +330,7 @@ def main(
         pause_every=1,
         noise_std=0.01,
         adjoint=True,
-        train_dir='./dump/single_band_no_mask/',
+        train_dir='./dump/gr_no_mask_param/',
         method="euler",
         show_prior=True,
         dpi=50,
@@ -347,14 +348,19 @@ def main(
     def y_transform(y):
         return y - 25.0
 
+    train_data_dir = '/home/jwp/stage/sl/magnify/latent_ode_data/train_drw_gr'
+    val_data_dir = '/home/jwp/stage/sl/magnify/latent_ode_data/val_drw_gr'
     train_dataset, val_dataset = drw_utils.get_drw_datasets(train_seed=123,
                                                             val_seed=456,
                                                             n_pointings=1,
                                                             bandpasses=bandpasses,
                                                             t_transform=t_transform,
-                                                            y_transform=y_transform)
+                                                            y_transform=y_transform,
+                                                            train_dir=train_data_dir,
+                                                            val_dir=val_data_dir)
 
     output_dim = len(bandpasses)
+    n_params = len(train_dataset.slice_params)
 
     train_loader = DataLoader(train_dataset, shuffle=True,
                               batch_size=batch_size)
@@ -371,6 +377,7 @@ def main(
         latent_size=latent_size,
         context_size=context_size,
         hidden_size=hidden_size,
+        n_params=n_params,
     ).to(device)
     n_params = sum(p.numel() for p in latent_sde.parameters() if p.requires_grad)
     print(f"Number of params: {n_params}")
@@ -411,22 +418,26 @@ def main(
                                    batch_size=vis_batch_size,
                                    bm=bm_vis).squeeze()
             ts_vis_, zs_ = ts_vis.cpu().numpy(), zs.cpu().numpy()
-            zs_ = np.sort(zs_, axis=1)
+            zs_ = np.sort(zs_, axis=1)  # sort along batch axis
 
             img_dir = os.path.join(train_dir, 'prior.png')
             plt.subplot(frameon=False)
-            for alpha, percentile in zip(alphas, percentiles):
-                idx = int((1 - percentile) / 2. * vis_batch_size)
-                zs_bot_ = zs_[:, idx]
-                zs_top_ = zs_[:, -idx]
-                plt.fill_between(ts_vis_, zs_bot_, zs_top_,
-                                 alpha=alpha, color=fill_color)
 
             # `zorder` determines who's on top; the larger the more at the top.
             # Plot data
-            plt.scatter(ts.cpu().numpy().squeeze(),
-                        ys_val.cpu().numpy().squeeze(),
-                        marker='x', zorder=3, color='k', s=35)  # last in batch
+            for band_i in range(output_dim):
+                for alpha, percentile in zip(alphas, percentiles):
+                    idx = int((1 - percentile) / 2. * vis_batch_size)
+                    zs_bot_ = zs_[:, idx, band_i]  # band_i=0 : g-band
+                    zs_top_ = zs_[:, -idx, band_i]
+                    plt.fill_between(ts_vis_,
+                                     zs_bot_,
+                                     zs_top_,
+                                     alpha=alpha, color=fill_color)
+
+                plt.scatter(ts.cpu().numpy().squeeze(),
+                            ys_val.cpu().numpy().squeeze()[:, band_i],
+                            marker='x', zorder=3, color='k', s=35)  # last in batch
             plt.ylim(ylims)
             plt.xlabel('$t$')
             plt.ylabel('$Y_t$')
@@ -442,7 +453,7 @@ def main(
         for i, batch in enumerate(train_loader):
             ys_batch = batch['y'].transpose(0, 1)  # [T, B, Y_out_dim]
             ts = batch['x'][-1, :]  # [T]
-            param_labels = batch['params']  # [B, n_params]
+            param_labels = batch['params'].float().to(device)  # [B, n_params]
             if trim_single_band:
                 trimmed_mask = batch['trimmed_mask'][-1, :, 0]  # [T,]
                 ys_batch = ys_batch[trimmed_mask, :, :]
@@ -463,6 +474,9 @@ def main(
                               global_step*n_batches+i)
             logger.add_scalar('kl_term',
                               (log_ratio*kl_scheduler.val).detach().cpu().item(),
+                              global_step*n_batches+i)
+            logger.add_scalar('param_loss',
+                              (param_loss).detach().cpu().item(),
                               global_step*n_batches+i)
             logger.add_scalar('learning_rate',
                               scheduler.optimizer.param_groups[0]['lr'],
@@ -486,7 +500,7 @@ def main(
                     # Note there's only one batch
                     ys_batch = val_batch['y'].transpose(0, 1)  # [T, B, Y_out_dim]
                     ts = val_batch['x'][-1, :]  # [T]
-                    param_labels = batch['params']  # [B, n_params]
+                    param_labels = val_batch['params'].float().to(device)  # [B, n_params]
                     if trim_single_band:
                         trimmed_mask = val_batch['trimmed_mask'][-1, :, 0]  # [T,]
                         ys_batch = ys_batch[trimmed_mask, :, :]
@@ -507,6 +521,9 @@ def main(
                     logger.add_scalar('val_kl_term',
                                       (log_ratio*kl_scheduler.val).detach().cpu().item(),
                                       global_step)
+                    logger.add_scalar('val_param_loss',
+                                      (param_loss).detach().cpu().item(),
+                                      global_step)
                 # Last example in batch
                 trimmed_mask = val_batch['trimmed_mask'][-1, :, 0]  # [T,]
                 ys_val = val_batch['y'][[-1], :, :]  # [1, T, Y_out_dim]
@@ -526,13 +543,14 @@ def main(
                 # ts_vis_ ~ [T_vis]
                 # sample_ ~ [T_vis]
                 fig, ax = plt.subplots()
-                # Plot sample for last light curve in batch
-                ax.plot(ts_vis.cpu().numpy(), sample_,  # last in batch
-                        color=mean_color)
-                # Plot data for last light curve in batch
-                ax.scatter(ts.cpu().numpy(),
-                           ys_val.cpu().numpy().squeeze(),  # last in batch
-                           marker='x', zorder=3, color='k', s=35)
+                for band_i in range(output_dim):
+                    # Plot sample for last light curve in batch
+                    ax.plot(ts_vis.cpu().numpy(), sample_[:, band_i],  # last in batch
+                            color=mean_color)
+                    # Plot data for last light curve in batch
+                    ax.scatter(ts.cpu().numpy(),
+                               ys_val.cpu().numpy().squeeze()[:, band_i],  # last in batch
+                               marker='x', zorder=3, color='k', s=35)
                 ax.set_ylim(ylims)
                 ax.set_xlabel('$t$')
                 ax.set_ylabel('$Y_t$')
