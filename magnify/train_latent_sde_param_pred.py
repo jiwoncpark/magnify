@@ -98,11 +98,45 @@ class Encoder(nn.Module):
         return out
 
 
+class ResMLP(nn.Module):
+    """Residual MLP that predicts the target quantities
+
+    Attributes
+    ----------
+    dim_in : int
+        Dimension of stochastic latent vector
+    dim_out : int
+        Number of target quantities to predict, or number of parameters
+        defining the posterior PDF over the target quantities
+    """
+    def __init__(self, dim_in, dim_out, dim_hidden=16):
+        self.dim_in = dim_in
+        self.dim_out = dim_out
+        self.dim_hidden = dim_hidden
+        self.pre_skip = nn.Sequential(nn.Linear(self.dim_in, self.dim_hidden),
+                                      nn.ReLU(),
+                                      nn.Linear(self.dim_hidden, self.dim_hidden),
+                                      nn.ReLU(),
+                                      nn.Linear(self.dim_hidden, self.dim_in),
+                                      nn.LayerNorm(self.dim_in))
+        self.post_skip = nn.Sequential(nn.Linear(self.dim_in, self.dim_hidden),
+                                       nn.ReLU(),
+                                       nn.Linear(self.dim_hidden, self.dim_out))
+
+    def forward(self, z0):
+        # z0 ~ [B, dim_in]
+        out = self.pre_skip(z0)  # [B, dim_in]
+        out = out + z0  # [B, dim_in], skip connection
+        out = self.post_skip(out)
+        return out
+
+
 class LatentSDE(nn.Module):
     sde_type = "ito"
     noise_type = "diagonal"
 
-    def __init__(self, data_size, latent_size, context_size, hidden_size):
+    def __init__(self, data_size, latent_size, context_size, hidden_size,
+                 n_params):
         super(LatentSDE, self).__init__()
         # Encoder.
         self.encoder = Encoder(input_size=data_size, hidden_size=hidden_size,
@@ -137,6 +171,8 @@ class LatentSDE(nn.Module):
             ]
         )
         self.projector = nn.Linear(latent_size, data_size)
+
+        self.param_mlp = ResMLP(latent_size, n_params, hidden_size)
 
         self.pz0_mean = nn.Parameter(torch.zeros(1, latent_size))
         self.pz0_logstd = nn.Parameter(torch.zeros(1, latent_size))
@@ -223,7 +259,10 @@ class LatentSDE(nn.Module):
         # Sum over times, mean over batches
         logqp0 = torch.distributions.kl_divergence(qz0, pz0).sum(dim=0).mean(dim=0)
         logqp_path = log_ratio.sum(dim=0).mean(dim=0)
-        return log_pxs, logqp0 + logqp_path
+
+        # Parameter predictions
+        param_pred = self.param_mlp(z0)
+        return log_pxs, logqp0 + logqp_path, param_pred
 
     @torch.no_grad()
     def sample_posterior(self, batch_size, xs, ts, ts_eval,
@@ -282,7 +321,6 @@ def main(
         context_size=128,
         hidden_size=128,
         lr_init=1e-2,
-        output_dim=1,
         t0=0.,
         t1=4.,
         lr_gamma=0.999,
@@ -295,7 +333,9 @@ def main(
         method="euler",
         show_prior=True,
         dpi=50,
+        bandpasses=['g', 'r'],
         trim_single_band=False,
+        param_weight=1e5,
 ):
     os.makedirs(train_dir, exist_ok=True)
     logger = SummaryWriter(train_dir)
@@ -310,9 +350,11 @@ def main(
     train_dataset, val_dataset = drw_utils.get_drw_datasets(train_seed=123,
                                                             val_seed=456,
                                                             n_pointings=1,
-                                                            bandpasses=['r'],
+                                                            bandpasses=bandpasses,
                                                             t_transform=t_transform,
                                                             y_transform=y_transform)
+
+    output_dim = len(bandpasses)
 
     train_loader = DataLoader(train_dataset, shuffle=True,
                               batch_size=batch_size)
@@ -337,7 +379,7 @@ def main(
                                                            factor=0.5,
                                                            patience=100)
     kl_scheduler = LinearScheduler(iters=kl_anneal_iters)
-
+    param_loss_fn = nn.MSELoss(reduction='mean')
     # Fix the same Brownian motion for visualization.
     vis_batch_size = len(val_dataset)
     ts_vis = t_transform(torch.arange(0, 3650+1, 1))  # tensor
@@ -400,15 +442,19 @@ def main(
         for i, batch in enumerate(train_loader):
             ys_batch = batch['y'].transpose(0, 1)  # [T, B, Y_out_dim]
             ts = batch['x'][-1, :]  # [T]
+            param_labels = batch['params']  # [B, n_params]
             if trim_single_band:
                 trimmed_mask = batch['trimmed_mask'][-1, :, 0]  # [T,]
                 ys_batch = ys_batch[trimmed_mask, :, :]
                 ts = ts[trimmed_mask]
             latent_sde.zero_grad()
-            log_pxs, log_ratio = latent_sde(ys_batch.to(device),
-                                            ts.to(device),
-                                            noise_std, adjoint, method)
-            loss = -log_pxs + log_ratio * kl_scheduler.val
+            log_pxs, log_ratio, param_pred = latent_sde(ys_batch.to(device),
+                                                        ts.to(device),
+                                                        noise_std, adjoint,
+                                                        method)
+            recon_loss = -log_pxs + log_ratio * kl_scheduler.val
+            param_loss = param_loss_fn(param_pred, param_labels)
+            loss = recon_loss + param_weight*param_loss
             logger.add_scalar('loss',
                               loss.detach().cpu().item(),
                               global_step*n_batches+i)
@@ -440,14 +486,18 @@ def main(
                     # Note there's only one batch
                     ys_batch = val_batch['y'].transpose(0, 1)  # [T, B, Y_out_dim]
                     ts = val_batch['x'][-1, :]  # [T]
+                    param_labels = batch['params']  # [B, n_params]
                     if trim_single_band:
                         trimmed_mask = val_batch['trimmed_mask'][-1, :, 0]  # [T,]
                         ys_batch = ys_batch[trimmed_mask, :, :]
                         ts = ts[trimmed_mask]
-                    log_pxs, log_ratio = latent_sde(ys_batch.to(device),
-                                                    ts.to(device),
-                                                    noise_std, adjoint, method)
-                    val_loss = -log_pxs + log_ratio * kl_scheduler.val
+                    log_pxs, log_ratio, param_pred = latent_sde(ys_batch.to(device),
+                                                                ts.to(device),
+                                                                noise_std, adjoint,
+                                                                method)
+                    recon_loss = -log_pxs + log_ratio * kl_scheduler.val
+                    param_loss = param_loss_fn(param_pred, param_labels)
+                    val_loss = recon_loss + param_weight*param_loss
                     logger.add_scalar('val_loss',
                                       val_loss.detach().cpu().item(),
                                       global_step)
