@@ -60,7 +60,7 @@ def main(
         batch_size=128,
         latent_size=16,
         context_size=128,
-        hidden_size=128,
+        hidden_size=64,
         lr_init=1e-2,
         t0=0.,
         t1=4.,
@@ -70,13 +70,14 @@ def main(
         pause_every=1,
         noise_std=0.01,
         adjoint=True,
-        train_dir='./dump/gr_no_mask_param/',
+        train_dir='./dump/gr_no_mask_param_drift/',
         method="euler",
         show_prior=True,
         dpi=50,
         bandpasses=['g', 'r'],
         trim_single_band=False,
         param_weight=1e5,
+        include_prior_drift=True,
 ):
     os.makedirs(train_dir, exist_ok=True)
     logger = SummaryWriter(train_dir)
@@ -118,6 +119,7 @@ def main(
         context_size=context_size,
         hidden_size=hidden_size,
         n_params=n_params,
+        include_prior_drift=include_prior_drift,
     ).to(device)
     n_params = sum(p.numel() for p in latent_sde.parameters() if p.requires_grad)
     print(f"Number of params: {n_params}")

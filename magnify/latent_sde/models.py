@@ -55,8 +55,9 @@ class LatentSDE(nn.Module):
     noise_type = "diagonal"
 
     def __init__(self, data_size, latent_size, context_size, hidden_size,
-                 n_params):
+                 n_params, include_prior_drift=False):
         super(LatentSDE, self).__init__()
+        self.include_prior_drift = include_prior_drift
         # Encoder.
         self.encoder = Encoder(input_size=data_size, hidden_size=hidden_size,
                                output_size=context_size)
@@ -90,8 +91,11 @@ class LatentSDE(nn.Module):
             ]
         )
         self.projector = nn.Linear(latent_size, data_size)
-
-        self.param_mlp = ResMLP(latent_size, n_params, hidden_size)
+        if self.include_prior_drift:
+            param_mlp_dim_in = latent_size+latent_size
+        else:
+            param_mlp_dim_in = latent_size
+        self.param_mlp = ResMLP(param_mlp_dim_in, n_params, hidden_size)
 
         self.pz0_mean = nn.Parameter(torch.zeros(1, latent_size))
         self.pz0_logstd = nn.Parameter(torch.zeros(1, latent_size))
@@ -126,7 +130,14 @@ class LatentSDE(nn.Module):
         i = min(torch.searchsorted(ts, t.min(), right=True), len(ts) - 1)
         # training time: y ~ [B, latent_dim]
         # inference time: y ~ [num**2, 1] from the meshgrid
-        return self.f_net(torch.cat((y, ctx[i]), dim=1))
+        f_in = torch.cat((y, ctx[i]), dim=1)
+        # Training time (for each time step)
+        # t ~ []
+        # y ~ [B, latent_dim]
+        # f_in ~ [B, latent_dim + context_dim]
+        f_out = self.f_net(f_in)
+        # f_out ~ [B, latent_dim]
+        return f_out
 
     def h(self, t, y):
         """Network that decodes the latent
@@ -142,7 +153,8 @@ class LatentSDE(nn.Module):
         """
         y = torch.split(y, split_size_or_sections=1, dim=1)
         out = [g_net_i(y_i) for (g_net_i, y_i) in zip(self.g_nets, y)]
-        return torch.cat(out, dim=1)
+        g_out = torch.cat(out, dim=1)  # [B, latent_dim]
+        return g_out
 
     def forward(self, xs, ts, noise_std, adjoint=False, method="euler"):
         # Contextualization is only needed for posterior inference.
@@ -168,7 +180,6 @@ class LatentSDE(nn.Module):
         else:
             zs, log_ratio = torchsde.sdeint(self, z0, ts, dt=1e-2, logqp=True,
                                             method=method)
-
         _xs = self.projector(zs)
         # _xs ~ [T, B, Y_out_dim] = [100, 1024, 3]
         xs_dist = Normal(loc=_xs, scale=noise_std)
@@ -182,7 +193,12 @@ class LatentSDE(nn.Module):
         logqp_path = log_ratio.sum(dim=0).mean(dim=0)
 
         # Parameter predictions
-        param_pred = self.param_mlp(z0)
+        if self.include_prior_drift:
+            param_pred = self.param_mlp(torch.cat([z0, self.h(None, z0)],
+                                                  dim=-1))
+        else:
+            param_pred = self.param_mlp(z0)
+
         return log_pxs, logqp0 + logqp_path, param_pred
 
     @torch.no_grad()
