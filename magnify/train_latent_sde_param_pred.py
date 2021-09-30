@@ -49,6 +49,22 @@ class LinearScheduler(object):
         return self._val
 
 
+class ExpScheduler(object):
+    def __init__(self, iters, maxval=1e5):
+        self._iters = max(1, iters)
+        self._val = 1.0
+        self._maxval = maxval
+
+    def step(self):
+        increased = np.log10(self._val) + np.log10(self._maxval) / self._iters
+        increased = 10**increased
+        self._val = min(self._maxval, increased)
+
+    @property
+    def val(self):
+        return self._val
+
+
 def manual_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
@@ -58,19 +74,19 @@ def manual_seed(seed: int):
 def main(
         n_train=128*100,
         batch_size=128,
-        latent_size=16,
-        context_size=128,
+        latent_size=10,
+        context_size=64,
         hidden_size=64,
         lr_init=1e-2,
         t0=0.,
-        t1=4.,
+        t1=2.,
         lr_gamma=0.999,
-        num_iters=150,
+        num_iters=40,
         kl_anneal_iters=1000,
         pause_every=1,
         noise_std=0.01,
         adjoint=True,
-        train_dir='./dump/gr_no_mask_param_drift/',
+        train_dir='./dump/gr_no_mask_param_drift_L10/',
         method="euler",
         show_prior=True,
         dpi=50,
@@ -84,10 +100,10 @@ def main(
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     def t_transform(x):
-        return x/3650.0*t1 + t0
+        return x/3650.0*(t1-t0)  # + t0
 
     def y_transform(y):
-        return y - 25.0
+        return y - 27.0
 
     train_data_dir = '/home/jwp/stage/sl/magnify/latent_ode_data/train_drw_gr'
     val_data_dir = '/home/jwp/stage/sl/magnify/latent_ode_data/val_drw_gr'
@@ -126,8 +142,11 @@ def main(
     optimizer = optim.Adam(params=latent_sde.parameters(), lr=lr_init)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
                                                            factor=0.5,
-                                                           patience=100)
+                                                           patience=3)
     kl_scheduler = LinearScheduler(iters=kl_anneal_iters)
+    n_updates = num_iters*len(train_dataset)//batch_size
+    param_w_scheduler = LinearScheduler(iters=int(n_updates),
+                                        maxval=param_weight)
     param_loss_fn = nn.MSELoss(reduction='mean')
     # Fix the same Brownian motion for visualization.
     vis_batch_size = len(val_dataset)
@@ -207,7 +226,7 @@ def main(
                                                         method)
             recon_loss = -log_pxs + log_ratio * kl_scheduler.val
             param_loss = param_loss_fn(param_pred, param_labels)
-            loss = recon_loss + param_weight*param_loss
+            loss = recon_loss + param_w_scheduler.val*param_loss
             logger.add_scalar('loss',
                               loss.detach().cpu().item(),
                               global_step*n_batches+i)
@@ -225,8 +244,8 @@ def main(
                               global_step*n_batches+i)
             loss.backward()
             optimizer.step()
-            scheduler.step(loss)
             kl_scheduler.step()
+            param_w_scheduler.step()
 
         latent_sde.eval()
         if global_step % pause_every == 0:
@@ -253,7 +272,8 @@ def main(
                                                                 method)
                     recon_loss = -log_pxs + log_ratio * kl_scheduler.val
                     param_loss = param_loss_fn(param_pred, param_labels)
-                    val_loss = recon_loss + param_weight*param_loss
+                    val_loss = recon_loss + param_w_scheduler.val*param_loss
+                    scheduler.step(recon_loss + param_loss)
                     logger.add_scalar('val_loss',
                                       val_loss.detach().cpu().item(),
                                       global_step)
@@ -301,7 +321,8 @@ def main(
 
         if val_loss < last_val_loss:
             script_utils.save_state(latent_sde, optimizer, scheduler,
-                                    kl_scheduler, global_step, train_dir)
+                                    kl_scheduler, global_step, train_dir,
+                                    param_w_scheduler)
             last_val_loss = val_loss
 
 
