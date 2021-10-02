@@ -33,13 +33,13 @@ class ResMLP(nn.Module):
         self.dim_out = dim_out
         self.dim_hidden = dim_hidden
         self.pre_skip = nn.Sequential(nn.Linear(self.dim_in, self.dim_hidden),
-                                      nn.Softplus(),
+                                      nn.LeakyReLU(),
                                       nn.Linear(self.dim_hidden, self.dim_hidden),
-                                      nn.Softplus(),
+                                      nn.LeakyReLU(),
                                       nn.Linear(self.dim_hidden, self.dim_in),
                                       nn.LayerNorm(self.dim_in))
         self.post_skip = nn.Sequential(nn.Linear(self.dim_in, self.dim_hidden),
-                                       nn.Softplus(),
+                                       nn.LeakyReLU(),
                                        nn.Linear(self.dim_hidden, self.dim_out))
 
     def forward(self, z0):
@@ -92,7 +92,7 @@ class LatentSDE(nn.Module):
         )
         self.projector = nn.Linear(latent_size, data_size)
         if self.include_prior_drift:
-            param_mlp_dim_in = latent_size*4 + 3
+            param_mlp_dim_in = latent_size*4 + context_size + 3
         else:
             param_mlp_dim_in = latent_size
         self.param_mlp = ResMLP(param_mlp_dim_in, n_params, hidden_size)
@@ -184,13 +184,13 @@ class LatentSDE(nn.Module):
         # _xs ~ [T, B, Y_out_dim] = [100, 1024, 3]
         xs_dist = Normal(loc=_xs, scale=noise_std)
         # Sum across times and dimensions, mean across examples in batch
-        log_pxs = xs_dist.log_prob(xs).sum(dim=0).mean()  # scalar
+        log_pxs = xs_dist.log_prob(xs).mean(dim=0).mean()  # scalar
 
         qz0 = torch.distributions.Normal(loc=qz0_mean, scale=qz0_logstd.exp())
         pz0 = torch.distributions.Normal(loc=self.pz0_mean, scale=self.pz0_logstd.exp())
         # Sum over times, mean over batches
-        logqp0 = torch.distributions.kl_divergence(qz0, pz0).sum(dim=0).mean(dim=0)
-        logqp_path = log_ratio.sum(dim=0).mean(dim=0)
+        logqp0 = torch.distributions.kl_divergence(qz0, pz0).mean(dim=0).mean(dim=0)
+        logqp_path = log_ratio.mean(dim=0).mean(dim=0)
 
         g = xs[:, :, [-1]].mean(dim=0)  # approx g mag
         r = xs[:, :, [1]].mean(dim=0)  # approx r mag
@@ -198,6 +198,7 @@ class LatentSDE(nn.Module):
         # Parameter predictions
         if self.include_prior_drift:
             param_pred = self.param_mlp(torch.cat([z0,
+                                                  ctx[0],
                                                   self.h(None, z0),
                                                   self.f(ts, z0),
                                                   self.g(None, z0),
