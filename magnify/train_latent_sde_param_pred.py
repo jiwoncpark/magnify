@@ -74,25 +74,25 @@ def manual_seed(seed: int):
 def main(
         n_train=128*100,
         batch_size=128,
-        latent_size=10,
+        latent_size=5,
         context_size=64,
         hidden_size=64,
         lr_init=1e-2,
         t0=0.,
         t1=2.,
         lr_gamma=0.999,
-        num_iters=40,
-        kl_anneal_iters=1000,
+        num_iters=30,
+        kl_anneal_iters=80*30,
         pause_every=1,
         noise_std=0.01,
         adjoint=True,
-        train_dir='./dump/gr_no_mask_param_drift_L10/',
+        train_dir='./dump/gr_no_mask_param_drift_L5/',
         method="euler",
         show_prior=True,
         dpi=50,
         bandpasses=['g', 'r'],
         trim_single_band=False,
-        param_weight=1e5,
+        param_weight=100,
         include_prior_drift=True,
 ):
     os.makedirs(train_dir, exist_ok=True)
@@ -140,9 +140,8 @@ def main(
     n_params = sum(p.numel() for p in latent_sde.parameters() if p.requires_grad)
     print(f"Number of params: {n_params}")
     optimizer = optim.Adam(params=latent_sde.parameters(), lr=lr_init)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
-                                                           factor=0.5,
-                                                           patience=3)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
+                                                step_size=4, gamma=0.5)
     kl_scheduler = LinearScheduler(iters=kl_anneal_iters)
     n_updates = num_iters*len(train_dataset)//batch_size
     param_w_scheduler = LinearScheduler(iters=int(n_updates),
@@ -226,7 +225,7 @@ def main(
                                                         method)
             recon_loss = -log_pxs + log_ratio * kl_scheduler.val
             param_loss = param_loss_fn(param_pred, param_labels)
-            loss = recon_loss + param_w_scheduler.val*param_loss
+            loss = recon_loss + param_weight*param_loss
             logger.add_scalar('loss',
                               loss.detach().cpu().item(),
                               global_step*n_batches+i)
@@ -272,8 +271,9 @@ def main(
                                                                 method)
                     recon_loss = -log_pxs + log_ratio * kl_scheduler.val
                     param_loss = param_loss_fn(param_pred, param_labels)
-                    val_loss = recon_loss + param_w_scheduler.val*param_loss
-                    scheduler.step(recon_loss + param_loss)
+                    val_loss = recon_loss + param_weight*param_loss
+                    unw_val_loss = (recon_loss + param_weight*param_loss).detach().cpu().item()
+                    scheduler.step()
                     logger.add_scalar('val_loss',
                                       val_loss.detach().cpu().item(),
                                       global_step)
@@ -319,11 +319,11 @@ def main(
                 fig.tight_layout()
                 logger.add_figure('recovery', fig, global_step=global_step)
 
-        if val_loss < last_val_loss:
-            script_utils.save_state(latent_sde, optimizer, scheduler,
-                                    kl_scheduler, global_step, train_dir,
-                                    param_w_scheduler)
-            last_val_loss = val_loss
+        # if unw_val_loss < last_val_loss:
+        script_utils.save_state(latent_sde, optimizer, scheduler,
+                                kl_scheduler, global_step, train_dir,
+                                param_w_scheduler, global_step)
+        # last_val_loss = unw_val_loss
 
 
 if __name__ == '__main__':
