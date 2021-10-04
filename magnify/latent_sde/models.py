@@ -91,6 +91,7 @@ class LatentSDE(nn.Module):
             ]
         )
         self.projector = nn.Linear(latent_size, data_size)
+        self.out_dim = data_size
         if self.include_prior_drift:
             param_mlp_dim_in = latent_size*4 + context_size + 3
         else:
