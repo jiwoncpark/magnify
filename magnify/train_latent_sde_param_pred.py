@@ -74,7 +74,7 @@ def manual_seed(seed: int):
 def main(
         n_train=128*100,
         batch_size=128,
-        latent_size=5,
+        latent_size=3,
         context_size=64,
         hidden_size=64,
         lr_init=1e-2,
@@ -82,16 +82,16 @@ def main(
         t1=2.,
         lr_gamma=0.999,
         num_iters=30,
-        kl_anneal_iters=80*30,
+        kl_anneal_iters=50,
         pause_every=1,
         noise_std=0.01,
         adjoint=True,
-        train_dir='./dump/gr_no_mask_param_drift_L5/',
+        train_dir='./dump/gr_no_mask_param_drift_L3_g_only/',
         method="euler",
         show_prior=True,
         dpi=50,
         bandpasses=['g', 'r'],
-        trim_single_band=False,
+        trim_single_band=True,
         param_weight=100,
         include_prior_drift=True,
 ):
@@ -141,7 +141,7 @@ def main(
     print(f"Number of params: {n_params}")
     optimizer = optim.Adam(params=latent_sde.parameters(), lr=lr_init)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
-                                                step_size=4, gamma=0.5)
+                                                step_size=6, gamma=0.5)
     kl_scheduler = LinearScheduler(iters=kl_anneal_iters)
     n_updates = num_iters*len(train_dataset)//batch_size
     param_w_scheduler = LinearScheduler(iters=int(n_updates),
@@ -319,11 +319,17 @@ def main(
                 fig.tight_layout()
                 logger.add_figure('recovery', fig, global_step=global_step)
 
-        # if unw_val_loss < last_val_loss:
-        script_utils.save_state(latent_sde, optimizer, scheduler,
-                                kl_scheduler, global_step, train_dir,
-                                param_w_scheduler, global_step)
-        # last_val_loss = unw_val_loss
+        if global_step%5 == 0:
+            script_utils.save_state(latent_sde, optimizer, scheduler,
+                                    kl_scheduler, global_step, train_dir,
+                                    param_w_scheduler, global_step)
+        elif unw_val_loss < last_val_loss:
+            script_utils.save_state(latent_sde, optimizer, scheduler,
+                                    kl_scheduler, global_step, train_dir,
+                                    param_w_scheduler, global_step)
+            last_val_loss = unw_val_loss
+        else:
+            pass
 
 
 if __name__ == '__main__':
