@@ -93,7 +93,8 @@ class LatentSDE(nn.Module):
         self.projector = nn.Linear(latent_size, data_size)
         self.out_dim = data_size
         if self.include_prior_drift:
-            param_mlp_dim_in = latent_size*4 + context_size + 3
+            param_mlp_dim_in = latent_size*4 + context_size + self.out_dim + 1
+            # self.out_dim for STD and 1 for g - r
         else:
             param_mlp_dim_in = latent_size
         self.param_mlp = ResMLP(param_mlp_dim_in, n_params, hidden_size)
@@ -193,8 +194,11 @@ class LatentSDE(nn.Module):
         logqp0 = torch.distributions.kl_divergence(qz0, pz0).mean(dim=0).mean(dim=0)
         logqp_path = log_ratio.mean(dim=0).mean(dim=0)
 
-        g = xs[:, :, [-1]].mean(dim=0)  # approx g mag
-        r = xs[:, :, [1]].mean(dim=0)  # approx r mag
+        g = xs[:, :, [0]].mean(dim=0)  # approx g mag
+        if self.out_dim > 1:
+            r = xs[:, :, [1]].mean(dim=0)  # approx r mag
+        else:
+            r = 0.0
         gr_std = xs.std(dim=0)  # approx std in g, r
         # Parameter predictions
         if self.include_prior_drift:
