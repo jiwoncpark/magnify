@@ -6,6 +6,7 @@ import numpy as np
 from tqdm import tqdm
 from astroML.time_series import ACF_scargle, ACF_EK
 from scipy import fftpack
+import warnings
 
 
 def sf_from_acf(acf):
@@ -15,7 +16,10 @@ def sf_from_acf(acf):
     ----------
     acf : np.ndarray
     """
-    return (1.0 - acf)**0.5
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        sf = (1.0 - acf)**0.5
+    return sf
 
 
 def get_acf_numpy(y):
@@ -70,7 +74,9 @@ def get_acf_scargle(t, y,
     ACF, t : ndarrays
         The auto-correlation function and associated times
     """
-    ACF, t = ACF_scargle(t, y, dy, n_omega, omega_max)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ACF, t = ACF_scargle(t, y, dy, n_omega, omega_max)
     return ACF, t
 
 
