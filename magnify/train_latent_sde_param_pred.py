@@ -81,17 +81,17 @@ def main(
         t0=0.,
         t1=2.,
         lr_gamma=0.999,
-        num_iters=30,
-        kl_anneal_iters=50,
+        num_iters=60,
+        kl_anneal_iters=5000,
         pause_every=1,
         noise_std=0.01,
         adjoint=True,
-        train_dir='./dump/gr_no_mask_param_drift_L3_g_only/',
+        train_dir='./dump/g_no_mask_param_drift_L3_t_zeroed/',
         method="euler",
         show_prior=True,
         dpi=50,
-        bandpasses=['g', 'r'],
-        trim_single_band=True,
+        bandpasses=['g'],
+        trim_single_band=False,
         param_weight=100,
         include_prior_drift=True,
 ):
@@ -100,13 +100,13 @@ def main(
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     def t_transform(x):
-        return x/3650.0*(t1-t0)  # + t0
+        return (x - x.min())/3650.0*(t1-t0)  # + t0
 
     def y_transform(y):
         return y - 27.0
 
-    train_data_dir = '/home/jwp/stage/sl/magnify/latent_ode_data/train_drw_gr'
-    val_data_dir = '/home/jwp/stage/sl/magnify/latent_ode_data/val_drw_gr'
+    train_data_dir = '/home/jwp/stage/sl/magnify/latent_ode_data/train_drw_g'
+    val_data_dir = '/home/jwp/stage/sl/magnify/latent_ode_data/val_drw_g'
     train_dataset, val_dataset = drw_utils.get_drw_datasets(train_seed=123,
                                                             val_seed=456,
                                                             n_pointings=1,
@@ -141,7 +141,7 @@ def main(
     print(f"Number of params: {n_params}")
     optimizer = optim.Adam(params=latent_sde.parameters(), lr=lr_init)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
-                                                step_size=6, gamma=0.5)
+                                                step_size=6, gamma=0.75)
     kl_scheduler = LinearScheduler(iters=kl_anneal_iters)
     n_updates = num_iters*len(train_dataset)//batch_size
     param_w_scheduler = LinearScheduler(iters=int(n_updates),
@@ -176,7 +176,7 @@ def main(
                 break
             zs = latent_sde.sample(ts=ts_vis,
                                    batch_size=vis_batch_size,
-                                   bm=bm_vis).squeeze()
+                                   bm=bm_vis)  # [T_vis, batch_size, out_dim]
             ts_vis_, zs_ = ts_vis.cpu().numpy(), zs.cpu().numpy()
             zs_ = np.sort(zs_, axis=1)  # sort along batch axis
 
@@ -196,7 +196,7 @@ def main(
                                      alpha=alpha, color=fill_color)
 
                 plt.scatter(ts.cpu().numpy().squeeze(),
-                            ys_val.cpu().numpy().squeeze()[:, band_i],
+                            ys_val.cpu().numpy()[:, band_i].squeeze(),
                             marker='x', zorder=3, color='k', s=35)  # last in batch
             plt.ylim(ylims)
             plt.xlabel('$t$')
@@ -211,12 +211,12 @@ def main(
     for global_step in tqdm(range(num_iters)):
         latent_sde.train()
         for i, batch in enumerate(train_loader):
-            ys_batch = batch['y'].transpose(0, 1)  # [T, B, Y_out_dim]
+            ys_batch = batch['y'].transpose(0, 1)  # [T, B, out_dim]
             ts = batch['x'][-1, :]  # [T]
             param_labels = batch['params'].float().to(device)  # [B, n_params]
             if trim_single_band:
                 trimmed_mask = batch['trimmed_mask'][-1, :, 0]  # [T,]
-                ys_batch = ys_batch[trimmed_mask, :, :]
+                ys_batch = ys_batch[trimmed_mask, :, :]  # [trimmed_T, B, out_dim]
                 ts = ts[trimmed_mask]
             latent_sde.zero_grad()
             log_pxs, log_ratio, param_pred = latent_sde(ys_batch.to(device),
@@ -299,7 +299,7 @@ def main(
                                                      ts.to(device),
                                                      ts_vis.to(device),
                                                      bm=None,
-                                                     method='euler').squeeze()
+                                                     method='euler')[:, :, band_i]
                 # zs ~ [T_vis=3651, B]
                 sample_ = sample.cpu().numpy()
                 # ts_vis_ ~ [T_vis]
@@ -311,7 +311,7 @@ def main(
                             color=mean_color)
                     # Plot data for last light curve in batch
                     ax.scatter(ts.cpu().numpy(),
-                               ys_val.cpu().numpy().squeeze()[:, band_i],  # last in batch
+                               ys_val.cpu().numpy()[:, band_i].squeeze(),  # last in batch
                                marker='x', zorder=3, color='k', s=35)
                 ax.set_ylim(ylims)
                 ax.set_xlabel('$t$')
@@ -319,7 +319,7 @@ def main(
                 fig.tight_layout()
                 logger.add_figure('recovery', fig, global_step=global_step)
 
-        if global_step%5 == 0:
+        if (global_step+1)%10 == 0:
             script_utils.save_state(latent_sde, optimizer, scheduler,
                                     kl_scheduler, global_step, train_dir,
                                     param_w_scheduler, global_step)
