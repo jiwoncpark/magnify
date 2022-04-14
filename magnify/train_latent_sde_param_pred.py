@@ -30,6 +30,8 @@ from torch.utils.data import DataLoader
 import magnify.script_utils as script_utils
 from magnify.latent_sde.models import LatentSDE
 import torchsde
+import wandb
+
 
 # w/ underscore -> numpy; w/o underscore -> torch.
 Data = namedtuple('Data', ['ts_', 'ts_ext_', 'ts_vis_', 'ts', 'ts_ext', 'ts_vis', 'ys', 'ys_'])
@@ -72,49 +74,66 @@ def manual_seed(seed: int):
 
 
 def main(
-        n_train=128*100,
-        batch_size=128,
-        latent_size=3,
+        n_train=10000,
+        n_val=1000,
+        batch_size=100,
+        latent_size=16,
         context_size=64,
         hidden_size=64,
         lr_init=1e-2,
         t0=0.,
-        t1=2.,
+        t1=4.,
         lr_gamma=0.999,
-        num_iters=60,
+        num_iters=200,
         kl_anneal_iters=5000,
         pause_every=1,
-        noise_std=0.01,
+        noise_std=0.1,
         adjoint=True,
-        train_dir='./dump/g_no_mask_param_drift_L3_t_zeroed/',
         method="euler",
         show_prior=True,
         dpi=50,
-        bandpasses=['g'],
+        bandpasses=list('ugriz'),
         trim_single_band=False,
-        param_weight=100,
+        param_weight=0,
         include_prior_drift=True,
+        n_pointings=100,
+        train_dir='train_ugriz',
+        val_dir='val_ugriz',
+        obs_dir='obs'
 ):
+    wandb.init(project="agn-variability", entity="jiwoncpark")
     os.makedirs(train_dir, exist_ok=True)
-    logger = SummaryWriter(train_dir)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     def t_transform(x):
         return (x - x.min())/3650.0*(t1-t0)  # + t0
 
     def y_transform(y):
-        return y - 27.0
+        return y - 20.0
 
-    train_data_dir = '/home/jwp/stage/sl/magnify/latent_ode_data/train_drw_g'
-    val_data_dir = '/home/jwp/stage/sl/magnify/latent_ode_data/val_drw_g'
     train_dataset, val_dataset = drw_utils.get_drw_datasets(train_seed=123,
                                                             val_seed=456,
-                                                            n_pointings=1,
+                                                            n_pointings=n_pointings,
                                                             bandpasses=bandpasses,
                                                             t_transform=t_transform,
                                                             y_transform=y_transform,
-                                                            train_dir=train_data_dir,
-                                                            val_dir=val_data_dir)
+                                                            n_train=n_train,
+                                                            n_val=n_val,
+                                                            train_dir=train_dir,
+                                                            val_dir=val_dir,
+                                                            obs_dir=obs_dir)
+    wandb.config = dict(n_train=len(train_dataset),
+                        n_val=len(val_dataset),
+                        batch_size=batch_size,
+                        latent_size=latent_size,
+                        context_size=context_size,
+                        hidden_size=hidden_size,
+                        lr_init=lr_init,
+                        noise_std=noise_std,
+                        adjoint=adjoint,
+                        n_bandpasses=len(bandpasses),
+                        lr_gamma=lr_gamma,
+                        )
 
     output_dim = len(bandpasses)
     n_params = len(train_dataset.slice_params)
@@ -137,6 +156,7 @@ def main(
         n_params=n_params,
         include_prior_drift=include_prior_drift,
     ).to(device)
+    wandb.watch(latent_sde)
     n_params = sum(p.numel() for p in latent_sde.parameters() if p.requires_grad)
     print(f"Number of params: {n_params}")
     optimizer = optim.Adam(params=latent_sde.parameters(), lr=lr_init)
@@ -161,7 +181,7 @@ def main(
     fill_color = '#9ebcda'
     mean_color = '#4d004b'
     # num_samples = len(sample_colors)
-    ylims = (-3.1, 3.1)
+    ylims = (-1.2, 1.2)
     if show_prior:
         with torch.no_grad():
             for batch in val_loader:
@@ -194,9 +214,9 @@ def main(
                                      zs_bot_,
                                      zs_top_,
                                      alpha=alpha, color=fill_color)
-
+                # print(ts.shape, ys_val.shape)
                 plt.scatter(ts.cpu().numpy().squeeze(),
-                            ys_val.cpu().numpy()[:, band_i].squeeze(),
+                            ys_val.cpu().numpy()[:, 0, band_i].squeeze(),
                             marker='x', zorder=3, color='k', s=35)  # last in batch
             plt.ylim(ylims)
             plt.xlabel('$t$')
@@ -226,21 +246,15 @@ def main(
             recon_loss = -log_pxs + log_ratio * kl_scheduler.val
             param_loss = param_loss_fn(param_pred, param_labels)
             loss = recon_loss + param_weight*param_loss
-            logger.add_scalar('loss',
-                              loss.detach().cpu().item(),
-                              global_step*n_batches+i)
-            logger.add_scalar('neg_log_pxs',
-                              (-log_pxs).detach().cpu().item(),
-                              global_step*n_batches+i)
-            logger.add_scalar('kl_term',
-                              (log_ratio*kl_scheduler.val).detach().cpu().item(),
-                              global_step*n_batches+i)
-            logger.add_scalar('param_loss',
-                              (param_loss).detach().cpu().item(),
-                              global_step*n_batches+i)
-            logger.add_scalar('learning_rate',
-                              scheduler.optimizer.param_groups[0]['lr'],
-                              global_step*n_batches+i)
+            log_step = global_step*n_batches+i
+            wandb.log(dict(loss=loss.detach().cpu().item(),
+                           neg_los_pxs=(-log_pxs).detach().cpu().item(),
+                           kl_term=(log_ratio*kl_scheduler.val).detach().cpu().item(),
+                           param_loss=(param_loss).detach().cpu().item(),
+                           learning_rate=scheduler.optimizer.param_groups[0]['lr']
+                           ),
+                      log_step
+                      )
             loss.backward()
             optimizer.step()
             kl_scheduler.step()
@@ -274,18 +288,13 @@ def main(
                     val_loss = recon_loss + param_weight*param_loss
                     unw_val_loss = (recon_loss + param_weight*param_loss).detach().cpu().item()
                     scheduler.step()
-                    logger.add_scalar('val_loss',
-                                      val_loss.detach().cpu().item(),
-                                      global_step)
-                    logger.add_scalar('val_neg_log_pxs',
-                                      (-log_pxs).detach().cpu().item(),
-                                      global_step)
-                    logger.add_scalar('val_kl_term',
-                                      (log_ratio*kl_scheduler.val).detach().cpu().item(),
-                                      global_step)
-                    logger.add_scalar('val_param_loss',
-                                      (param_loss).detach().cpu().item(),
-                                      global_step)
+                    wandb.log(dict(val_loss=val_loss.detach().cpu().item(),
+                                   val_neg_los_pxs=(-log_pxs).detach().cpu().item(),
+                                   val_kl_term=(log_ratio*kl_scheduler.val).detach().cpu().item(),
+                                   val_param_loss=(param_loss).detach().cpu().item(),
+                                   ),
+                              log_step
+                              )
                 # Last example in batch
                 trimmed_mask = val_batch['trimmed_mask'][-1, :, 0]  # [T,]
                 ys_val = val_batch['y'][[-1], :, :]  # [1, T, Y_out_dim]
@@ -299,25 +308,26 @@ def main(
                                                      ts.to(device),
                                                      ts_vis.to(device),
                                                      bm=None,
-                                                     method='euler')[:, :, band_i]
+                                                     method='euler')
                 # zs ~ [T_vis=3651, B]
-                sample_ = sample.cpu().numpy()
+                sample_ = sample.cpu().numpy()  # [T_vis, 1, n_bandpasses]
                 # ts_vis_ ~ [T_vis]
-                # sample_ ~ [T_vis]
+                # sample_fp ~ [T_vis]
                 fig, ax = plt.subplots()
                 for band_i in range(output_dim):
                     # Plot sample for last light curve in batch
-                    ax.plot(ts_vis.cpu().numpy(), sample_[:, band_i],  # last in batch
+                    ax.plot(ts_vis.cpu().numpy(), sample_[:, 0, band_i],  # last in batch
                             color=mean_color)
                     # Plot data for last light curve in batch
+                    # ys_val ~ [T_vis, 1, n_bandpasses]
                     ax.scatter(ts.cpu().numpy(),
-                               ys_val.cpu().numpy()[:, band_i].squeeze(),  # last in batch
+                               ys_val.cpu().numpy()[:, 0, band_i].squeeze(),  # last in batch
                                marker='x', zorder=3, color='k', s=35)
                 ax.set_ylim(ylims)
                 ax.set_xlabel('$t$')
                 ax.set_ylabel('$Y_t$')
                 fig.tight_layout()
-                logger.add_figure('recovery', fig, global_step=global_step)
+                wandb.log({"recovery": wandb.Image(fig)}, log_step)
 
         if (global_step+1)%10 == 0:
             script_utils.save_state(latent_sde, optimizer, scheduler,

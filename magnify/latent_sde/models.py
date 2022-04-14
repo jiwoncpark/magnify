@@ -160,6 +160,8 @@ class LatentSDE(nn.Module):
 
     def forward(self, xs, ts, noise_std, adjoint=False, method="euler"):
         # Contextualization is only needed for posterior inference.
+        # xs ~ [T, B, n_bandpasses]
+        print("nan", torch.isnan(xs).sum())
         ctx = self.encoder(torch.flip(xs, dims=(0,)))  # [T, B, context_size] = [100, 1024, 64]
         ctx = torch.flip(ctx, dims=(0,))  # revert to original time sequence
         self.contextualize((ts, ctx))
@@ -183,6 +185,7 @@ class LatentSDE(nn.Module):
             zs, log_ratio = torchsde.sdeint(self, z0, ts, dt=1e-2, logqp=True,
                                             method=method)
         _xs = self.projector(zs)
+        print("nan projected", torch.isnan(_xs).sum())
         # _xs ~ [T, B, Y_out_dim] = [100, 1024, 3]
         xs_dist = Normal(loc=_xs, scale=noise_std)
         # Sum across times and dimensions, mean across examples in batch
