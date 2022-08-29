@@ -23,20 +23,25 @@ $python magnify/train_anp.py
 2. Latent ODE (Rubanova et al 2019)
 
 * Toy dataset of 1d periodic functions with varying frequency
-```bash
-python magnify/train_latent_ode.py --niters 600 -n 1000 -s 50 -l 10 --dataset periodic --latent-ode --noise-weight 0.01 --regress
-```
+
+::
+
+$python magnify/train_latent_ode.py --niters 600 -n 1000 -s 50 -l 10 --dataset periodic --latent-ode --noise-weight 0.01 --regress
+
 
 * Mock AGN light curves, simulated using the damped random walk model
-```bash
-python magnify/train_latent_ode.py --batch-size 60 --niters 50 -n 10000 -l 20 --dataset drw --latent-ode --regress
-```
+
+::
+
+$python magnify/train_latent_ode.py --batch-size 60 --niters 50 -n 10000 -l 20 --dataset drw --latent-ode --regress
+
 
 3. Latent SDE (Li et al 2020)
 
 * Single mock AGN light curve, simulated using the damped random walk model
-```bash
-pip install torchsde
-python magnify/train_latent_sde_drw.py --train-dir <TRAIN_DIR>
-```
+
+::
+
+$pip install torchsde
+$python magnify/train_latent_sde_param_pred.py
 
