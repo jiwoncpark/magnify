@@ -31,6 +31,7 @@ import magnify.script_utils as script_utils
 from magnify.latent_sde.models import LatentSDE
 import torchsde
 import wandb
+import pdb
 
 
 # w/ underscore -> numpy; w/o underscore -> torch.
@@ -74,27 +75,27 @@ def manual_seed(seed: int):
 
 
 def main(
-        n_train=10000,
-        n_val=1000,
-        batch_size=100,
-        latent_size=16,
-        context_size=64,
+        n_train=100,
+        n_val=100,
+        batch_size=20,
+        latent_size=4,
+        context_size=32,
         hidden_size=64,
         lr_init=1e-2,
         t0=0.,
-        t1=4.,
-        lr_gamma=0.999,
+        t1=2.,
+        lr_gamma=0.997,
         num_iters=200,
-        kl_anneal_iters=5000,
+        kl_anneal_iters=10000,
         pause_every=1,
-        noise_std=0.1,
-        adjoint=True,
+        noise_std=0.01,
+        adjoint=False,
         method="euler",
         show_prior=True,
         dpi=50,
         bandpasses=list('ugriz'),
         trim_single_band=False,
-        param_weight=0,
+        param_weight=10.0,
         include_prior_drift=True,
         n_pointings=100,
         train_dir='train_ugriz',
@@ -109,7 +110,7 @@ def main(
         return (x - x.min())/3650.0*(t1-t0)  # + t0
 
     def y_transform(y):
-        return y - 20.0
+        return (y - y.mean(0))/y.std(0)
 
     train_dataset, val_dataset = drw_utils.get_drw_datasets(train_seed=123,
                                                             val_seed=456,
@@ -156,7 +157,7 @@ def main(
         n_params=n_params,
         include_prior_drift=include_prior_drift,
     ).to(device)
-    wandb.watch(latent_sde)
+    wandb.watch(latent_sde, log='all', log_freq=1)
     n_params = sum(p.numel() for p in latent_sde.parameters() if p.requires_grad)
     print(f"Number of params: {n_params}")
     optimizer = optim.Adam(params=latent_sde.parameters(), lr=lr_init)
@@ -169,7 +170,7 @@ def main(
     param_loss_fn = nn.MSELoss(reduction='mean')
     # Fix the same Brownian motion for visualization.
     vis_batch_size = len(val_dataset)
-    ts_vis = t_transform(torch.arange(0, 3650+1, 1))  # tensor
+    ts_vis = t_transform(torch.arange(0, 3650+1, 1))/3650*(t1-t0)  # tensor
     bm_vis = torchsde.BrownianInterval(
         t0=t0, t1=t1, size=(vis_batch_size, latent_size,), device=device,
         levy_area_approximation="space-time")
@@ -239,7 +240,7 @@ def main(
                 ys_batch = ys_batch[trimmed_mask, :, :]  # [trimmed_T, B, out_dim]
                 ts = ts[trimmed_mask]
             latent_sde.zero_grad()
-            log_pxs, log_ratio, param_pred = latent_sde(ys_batch.to(device),
+            log_pxs, log_ratio, param_pred, _xs = latent_sde(ys_batch.to(device),
                                                         ts.to(device),
                                                         noise_std, adjoint,
                                                         method)
@@ -255,7 +256,19 @@ def main(
                            ),
                       log_step
                       )
+            nan_detected = False
+            #if torch.any(torch.isnan(_xs)):
+            #    continue
+            for p in latent_sde.parameters():
+                if p.grad is None:
+                    continue
+                if torch.any(torch.isnan(p.grad)):
+                    nan_detected = True
+                    print("nan detected")
+            if nan_detected:
+                continue
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(latent_sde.parameters(), 0.001)
             optimizer.step()
             kl_scheduler.step()
             param_w_scheduler.step()
@@ -279,7 +292,7 @@ def main(
                         trimmed_mask = val_batch['trimmed_mask'][-1, :, 0]  # [T,]
                         ys_batch = ys_batch[trimmed_mask, :, :]
                         ts = ts[trimmed_mask]
-                    log_pxs, log_ratio, param_pred = latent_sde(ys_batch.to(device),
+                    log_pxs, log_ratio, param_pred, _xs = latent_sde(ys_batch.to(device),
                                                                 ts.to(device),
                                                                 noise_std, adjoint,
                                                                 method)

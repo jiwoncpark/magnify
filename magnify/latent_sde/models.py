@@ -93,8 +93,9 @@ class LatentSDE(nn.Module):
         self.projector = nn.Linear(latent_size, data_size)
         self.out_dim = data_size
         if self.include_prior_drift:
-            param_mlp_dim_in = latent_size*4 + context_size + self.out_dim + 1
+            #param_mlp_dim_in = latent_size*4 + context_size + self.out_dim + 1
             # self.out_dim for STD and 1 for g - r
+            param_mlp_dim_in = latent_size*4 + context_size
         else:
             param_mlp_dim_in = latent_size
         self.param_mlp = ResMLP(param_mlp_dim_in, n_params, hidden_size)
@@ -161,7 +162,7 @@ class LatentSDE(nn.Module):
     def forward(self, xs, ts, noise_std, adjoint=False, method="euler"):
         # Contextualization is only needed for posterior inference.
         # xs ~ [T, B, n_bandpasses]
-        print("nan", torch.isnan(xs).sum())
+        # print("nan", torch.isnan(xs).sum())
         ctx = self.encoder(torch.flip(xs, dims=(0,)))  # [T, B, context_size] = [100, 1024, 64]
         ctx = torch.flip(ctx, dims=(0,))  # revert to original time sequence
         self.contextualize((ts, ctx))
@@ -185,7 +186,7 @@ class LatentSDE(nn.Module):
             zs, log_ratio = torchsde.sdeint(self, z0, ts, dt=1e-2, logqp=True,
                                             method=method)
         _xs = self.projector(zs)
-        print("nan projected", torch.isnan(_xs).sum())
+        # print("nan projected", torch.isnan(_xs).sum())
         # _xs ~ [T, B, Y_out_dim] = [100, 1024, 3]
         xs_dist = Normal(loc=_xs, scale=noise_std)
         # Sum across times and dimensions, mean across examples in batch
@@ -197,12 +198,12 @@ class LatentSDE(nn.Module):
         logqp0 = torch.distributions.kl_divergence(qz0, pz0).mean(dim=0).mean(dim=0)
         logqp_path = log_ratio.mean(dim=0).mean(dim=0)
 
-        g = xs[:, :, [0]].mean(dim=0)  # approx g mag
-        if self.out_dim > 1:
-            r = xs[:, :, [1]].mean(dim=0)  # approx r mag
-        else:
-            r = 0.0
-        gr_std = xs.std(dim=0)  # approx std in g, r
+        #g = xs[:, :, [0]].mean(dim=0)  # approx g mag
+        #if self.out_dim > 1:
+        #    r = xs[:, :, [1]].mean(dim=0)  # approx r mag
+        #else:
+        #    r = 0.0
+        #gr_std = xs.std(dim=0)  # approx std in g, r
         # Parameter predictions
         if self.include_prior_drift:
             param_pred = self.param_mlp(torch.cat([z0,
@@ -210,13 +211,14 @@ class LatentSDE(nn.Module):
                                                   self.h(None, z0),
                                                   self.f(ts, z0),
                                                   self.g(None, z0),
-                                                  g-r,
-                                                  gr_std],
+                                                  #g-r,
+                                                  #gr_std
+                                                  ],
                                                   dim=-1))
         else:
             param_pred = self.param_mlp(z0)
 
-        return log_pxs, logqp0 + logqp_path, param_pred
+        return log_pxs, logqp0 + logqp_path, param_pred, _xs
 
     @torch.no_grad()
     def sample_posterior(self, batch_size, xs, ts, ts_eval,
